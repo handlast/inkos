@@ -155,6 +155,16 @@ export function parseWriterOutput(
     updatedSubplots: extract("UPDATED_SUBPLOTS"),
     updatedEmotionalArcs: extract("UPDATED_EMOTIONAL_ARCS"),
     updatedCharacterMatrix: extract("UPDATED_CHARACTER_MATRIX"),
+    updatedRelationshipGraph: extract("UPDATED_RELATIONSHIP_GRAPH"),
+    updatedEraMood: extract("UPDATED_ERA_MOOD"),
+    updatedMilitaryForces: extract("UPDATED_MILITARY_FORCES"),
+    updatedWarTheater: extract("UPDATED_WAR_THEATER"),
+    updatedDynastyTree: extract("UPDATED_DYNASTY_TREE"),
+    updatedNavalForces: extract("UPDATED_NAVAL_FORCES"),
+    updatedTerritoryControl: extract("UPDATED_TERRITORY_CONTROL"),
+    updatedTreasuryState: extract("UPDATED_TREASURY_STATE"),
+    updatedEpochTimeline: extract("UPDATED_EPOCH_TIMELINE"),
+    updatedGeography: extract("UPDATED_GEOGRAPHY"),
   };
 }
 

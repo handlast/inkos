@@ -77,6 +77,10 @@ export interface ArchitectOutput {
   readonly volumeMap?: string;
   readonly rhythmPrinciples?: string;
   readonly roles?: ReadonlyArray<ArchitectRole>;
+  readonly allianceState?: string;
+  readonly warLedgers?: string;
+  readonly phaseOutline?: string;
+  readonly chapterSkeleton?: string;
 }
 
 export class ArchitectIncompleteFoundationError extends Error {
@@ -184,7 +188,7 @@ ${reviseFrom.bookRules || "（无）"}
 ${reviseFrom.characterMatrix || "（无）"}
 
 你的任务：
-1. 把现有内容重新组织成当前 5 段 SECTION：story_frame / volume_map / roles / book_rules / pending_hooks
+1. 把现有内容重新组织成当前 5 段必选 SECTION：story_frame / volume_map / roles / book_rules / pending_hooks（涉及战争/势力体系时额外输出 alliance_state 和 war_ledgers）
 2. story_frame 使用段落式世界观与核心冲突，不要退回条目表格
 3. volume_map 使用段落式卷/章级方向，并把节奏原则放进末段
 4. roles 必须按一人一卡输出，主要/次要角色判断沿用原内容，缺失才按主线重要性推断
@@ -226,7 +230,7 @@ ${numericalBlock}
 ${powerBlock}
 ${eraBlock}
 
-## 输出结构（5 个 SECTION，严格按 === SECTION: === 分块，不要漏任何一块）
+## 输出结构（7 个 SECTION，严格按 === SECTION: === 分块，不要漏任何一块。alliance_state 和 war_ledgers 为可选——题材不需要战争/势力体系时可省略）
 
 ## 去重铁律（必读）
 禁止在多段里重复同一事实。主角弧线只写在 roles；世界铁律只写在 story_frame.世界观底色；节奏原则只写在 volume_map 最后一段；角色当前现状只写在 roles.当前现状；初始钩子只写在 pending_hooks（startChapter=0 行）。**如果本书是年代文/历史同人/都市重生等需要年份、季节、重大历史事件作为锚点的题材**，把环境/时代锚自然织进 story_frame.世界观底色（"1985 年 7 月，非典刚过"这类）；**修仙/玄幻/系统等没有真实年份的题材直接省略**，不要硬凑。如果一个段落写了另一段的内容，删掉。
@@ -402,7 +406,7 @@ ${gp.eraResearch ? `## 年代限制
 - **pending_hooks 表必须包含 Phase 7 扩展列——depends_on 标出因果链、pays_off_in_arc 锁定回收大致位置、core_hook 标记主线承重伏笔（3-7 条）、half_life 仅给重点伏笔设置**
 
 ## 硬性完结检查（生成前读一遍）
-必须依次输出全部 **5 个 SECTION 块**：story_frame → volume_map → roles → book_rules → pending_hooks，不允许因为 story_frame 或 volume_map 写长了就不写后 3 段。哪怕 roles 只列 3 个角色、book_rules 只有 Markdown 小块、pending_hooks 只有 3 行，也要完整输出。只有写完 pending_hooks 最后一行才算交付。`;
+必须依次输出全部 **5 个必选 SECTION 块**：story_frame → volume_map → roles → book_rules → pending_hooks，不允许因为 story_frame 或 volume_map 写长了就不写后 3 段。哪怕 roles 只列 3 个角色、book_rules 只有 Markdown 小块、pending_hooks 只有 3 行，也要完整输出。只有写完 pending_hooks 最后一行才算交付。如果题材涉及战争/势力体系，额外输出 alliance_state 和 war_ledgers 两个 SECTION。`;
   }
 
   private buildEnglishFoundationPrompt(
@@ -432,7 +436,7 @@ ${numericalBlock}
 ${powerBlock}
 ${eraBlock}
 
-## Output contract (5 === SECTION: === blocks)
+## Output contract (7 === SECTION: === blocks — alliance_state and war_ledgers are optional, emit only when the genre involves war/faction systems)
 
 ## Deduplication rule (MANDATORY)
 Do not duplicate the same fact across sections. The protagonist's arc lives only in roles; world hard-rules live only in story_frame; rhythm principles live only in the last paragraph of volume_map; character initial status lives only in roles.Current_State; initial hooks live only in pending_hooks (start_chapter=0 rows). **When the book is period fiction / historical fanfic / urban reincarnation** — anything pinned to a real year, season, or historic marker — weave the environment/era anchor into story_frame's world-tonal-ground paragraph (e.g. "July 1985, just after the SARS wave"). **For cultivation / high-fantasy / system genres that have no real-world year, skip it entirely** — do not fabricate an era anchor. If a section repeats content that belongs elsewhere, delete it.
@@ -600,7 +604,7 @@ Rules:
 - **pending_hooks table MUST carry Phase 7 extended columns — depends_on spells out the causal chain, pays_off_in_arc locks the approximate payoff location, core_hook marks main-line load-bearing hooks (3-7 per book), half_life only on priority hooks**
 
 ## Hard completeness check (read before generating)
-You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → roles → book_rules → pending_hooks. Do NOT stop after story_frame or volume_map just because they ran long. Even if roles lists only 3 characters, book_rules is a small Markdown block, and pending_hooks has only 3 rows, all five must appear. The output is only considered delivered after the last row of pending_hooks is written.`;
+You MUST emit all **5 required SECTION blocks in order**: story_frame → volume_map → roles → book_rules → pending_hooks. Do NOT stop after story_frame or volume_map just because they ran long. Even if roles lists only 3 characters, book_rules is a small Markdown block, and pending_hooks has only 3 rows, all five must appear. The output is only considered delivered after the last row of pending_hooks is written. If the genre involves war/faction systems, also emit alliance_state and war_ledgers as additional SECTIONs.`;
   }
 
   // -------------------------------------------------------------------------
@@ -648,7 +652,7 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
           "You repair InkOS architect output formatting.",
           "The previous draft is partially useful but is missing required SECTION blocks.",
           "Do not invent a new book. Preserve usable existing content and add the missing parts.",
-          "Return the complete output with exactly these 5 SECTION blocks in order: story_frame, volume_map, roles, book_rules, pending_hooks.",
+          "Return the complete output with exactly these 5 required SECTION blocks in order: story_frame, volume_map, roles, book_rules, pending_hooks. Optionally emit alliance_state and war_ledgers if the genre involves war/faction systems.",
           "book_rules must be ordinary Markdown, not YAML. pending_hooks must be a Markdown table.",
           "Do not explain the repair.",
         ].join("\n")
@@ -656,7 +660,7 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
           "你负责修复 InkOS architect 的输出格式。",
           "上一轮草稿有可用内容，但缺少必需的 SECTION 块。",
           "不要重新发明一本书；保留已有可用内容，只补齐缺失部分并整理成完整输出。",
-          "必须按顺序返回完整 5 段 SECTION：story_frame、volume_map、roles、book_rules、pending_hooks。",
+          "必须按顺序返回完整 5 段必选 SECTION：story_frame、volume_map、roles、book_rules、pending_hooks。涉及战争/势力体系时额外输出 alliance_state 和 war_ledgers。",
           "book_rules 必须是普通 Markdown，不要 YAML；pending_hooks 必须是 Markdown 表格。",
           "不要解释修复过程。",
         ].join("\n");
@@ -695,6 +699,10 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     // 系统文) omit them entirely.
     const currentStateLegacy = parsedSections.get("current_state") ?? "";
     const pendingHooksRaw = parsedSections.get("pending_hooks");
+    const allianceStateRaw = parsedSections.get("alliance_state") ?? "";
+    const warLedgersRaw = parsedSections.get("war_ledgers") ?? "";
+    const phaseOutlineRaw = parsedSections.get("phase_outline") ?? "";
+    const chapterSkeletonRaw = parsedSections.get("chapter_skeleton") ?? "";
 
     // 5-section required contract: story_frame (or legacy story_bible),
     // volume_map (or legacy volume_outline), roles, book_rules, pending_hooks.
@@ -743,6 +751,10 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
       volumeMap: effectiveVolumeMap,
       rhythmPrinciples,
       roles,
+      allianceState: allianceStateRaw,
+      warLedgers: warLedgersRaw,
+      phaseOutline: phaseOutlineRaw,
+      chapterSkeleton: chapterSkeletonRaw,
     };
   }
 
@@ -837,6 +849,141 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
   }
 
   // -------------------------------------------------------------------------
+  // War ledger cross-file consistency validation
+  // -------------------------------------------------------------------------
+  parseFactionNamesFromAlliance(allianceRaw: string): Set<string> {
+    const names = new Set<string>();
+    if (!allianceRaw?.trim()) return names;
+    const lines = allianceRaw.split("\n");
+    let inFactionTable = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (/^##\s*(势力阵营|Factions)/i.test(trimmed)) { inFactionTable = true; continue; }
+      if (/^##\s/.test(trimmed) && inFactionTable) break;
+      if (!inFactionTable) continue;
+      if (!trimmed.startsWith("|") || trimmed.includes("---")) continue;
+      const cells = trimmed.split("|").slice(1, -1).map((c) => c.trim());
+      if (cells.length >= 2 && cells[0] && !/^faction_id|id/i.test(cells[0])) {
+        names.add(cells[0]!);
+        names.add(cells[1]!);
+      }
+    }
+    return names;
+  }
+
+  matchFactionName(name: string, factionNames: Set<string>): boolean {
+    if (factionNames.has(name)) return true;
+    for (const f of factionNames) {
+      if (f.includes(name) || name.includes(f)) return true;
+    }
+    return false;
+  }
+
+  validateWarLedgerConsistency(output: ArchitectOutput): string[] {
+    const warnings: string[] = [];
+    const factionNames = this.parseFactionNamesFromAlliance(output.allianceState ?? "");
+    const roleNames = new Set((output.roles ?? []).map((r) => r.name));
+    const warRaw = output.warLedgers ?? "";
+    if (!warRaw.trim() || factionNames.size === 0) return warnings;
+
+    const parts = warRaw.split(/^##\s+/m).filter(Boolean);
+    for (const part of parts) {
+      const lines = part.split("\n");
+      const heading = (lines[0] ?? "").trim().toLowerCase().replace(/\s+/g, "_");
+      const body = lines.slice(1).join("\n").trim();
+      const dataRows = body.split("\n")
+        .filter((l) => l.trim().startsWith("|"))
+        .filter((l) => !l.includes("---"))
+        .filter((l) => {
+          const cells = l.split("|").map((c) => c.trim()).filter(Boolean);
+          return cells.length > 0 && !/^(force_id|theater_id|battle_id|territory_id|character_a|era_id|epoch_id|fleet_id|person_id|faction|faction_id)$/i.test(cells[0]!);
+        });
+
+      for (const row of dataRows) {
+        const cells = row.split("|").slice(1, -1).map((c) => c.trim());
+        const id = cells[0] ?? "?";
+        if (heading === "battle_log" && cells[4]) {
+          const belligerents = cells[4]!.split(",").map((s) => s.trim()).filter(Boolean);
+          for (const b of belligerents) {
+            if (!this.matchFactionName(b, factionNames)) warnings.push(`${heading} ${id}: belligerent "${b}" not in alliance_state`);
+          }
+        }
+        if (heading === "war_theater" && cells[2]) {
+          const belligerents = cells[2]!.split(",").map((s) => s.trim()).filter(Boolean);
+          for (const b of belligerents) {
+            if (!this.matchFactionName(b, factionNames)) warnings.push(`${heading} ${id}: belligerent "${b}" not in alliance_state`);
+          }
+        }
+        if ((heading === "military_forces" || heading === "naval_forces") && cells[1]) {
+          if (!this.matchFactionName(cells[1]!, factionNames)) warnings.push(`${heading} ${id}: faction "${cells[1]}" not in alliance_state`);
+        }
+        if (heading === "treasury_state" && cells[0]) {
+          if (!this.matchFactionName(cells[0]!, factionNames)) warnings.push(`${heading}: faction "${cells[0]}" not in alliance_state`);
+        }
+        if (heading === "territory_control" && cells[3]) {
+          if (!this.matchFactionName(cells[3]!, factionNames)) warnings.push(`${heading} ${id}: controller "${cells[3]}" not in alliance_state`);
+        }
+        if (heading === "dynasty_tree" && cells[1]) {
+          if (!roleNames.has(cells[1]!)) warnings.push(`${heading} ${id}: "${cells[1]}" not in roles`);
+        }
+      }
+      if (heading === "era_mood") {
+        const chapters = dataRows.map((row) => {
+          const cells = row.split("|").slice(1, -1).map((c) => c.trim());
+          return cells[2];
+        }).filter(Boolean);
+        const seen = new Set<string>();
+        for (const ch of chapters) {
+          if (seen.has(ch!)) warnings.push(`era_mood: duplicate start_chapter ${ch}`);
+          seen.add(ch!);
+        }
+      }
+    }
+    return warnings;
+  }
+
+  /**
+   * Parse the war_ledgers SECTION into individual ledger files.
+   * Splits on `## ` headings and maps each to a filename.
+   * Only returns sub-tables that have actual data rows (not just headers).
+   */
+  parseWarLedgersSection(raw: string): Array<[string, string]> {
+    if (!raw.trim()) return [];
+    const HEADING_TO_FILE: Record<string, string> = {
+      military_forces: "military_forces.md",
+      war_theater: "war_theater.md",
+      battle_log: "battle_log.md",
+      territory_control: "territory_control.md",
+      relationship_graph: "relationship_graph.md",
+      era_mood: "era_mood.md",
+      epoch_timeline: "epoch_timeline.md",
+      naval_forces: "naval_forces.md",
+      dynasty_tree: "dynasty_tree.md",
+      treasury_state: "treasury_state.md",
+    };
+    const results: Array<[string, string]> = [];
+    const parts = raw.split(/^##\s+/m).filter(Boolean);
+    for (const part of parts) {
+      const lines = part.split("\n");
+      const heading = (lines[0] ?? "").trim().toLowerCase().replace(/\s+/g, "_");
+      const filename = HEADING_TO_FILE[heading];
+      if (!filename) continue;
+      const body = lines.slice(1).join("\n").trim();
+      const dataRows = body.split("\n")
+        .filter((line) => line.trim().startsWith("|"))
+        .filter((line) => !line.includes("---"))
+        .filter((line) => {
+          const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+          return cells.length > 0 && !/^(force_id|theater_id|battle_id|territory_id|character_a|era_id|epoch_id|fleet_id|person_id|faction)$/i.test(cells[0]!);
+        });
+      if (dataRows.length === 0) continue;
+      const content = `# ${heading}\n\n${body}\n`;
+      results.push([filename, content]);
+    }
+    return results;
+  }
+
+  // -------------------------------------------------------------------------
   // File writing
   // -------------------------------------------------------------------------
   async writeFoundationFiles(
@@ -865,6 +1012,11 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     const volumeMap = output.volumeMap ?? output.volumeOutline;
     const rhythmPrinciples = output.rhythmPrinciples ?? "";
     const roles = output.roles ?? [];
+    // Cross-validate war ledgers against alliance_state and roles
+    const warWarnings = this.validateWarLedgerConsistency(output);
+    for (const w of warWarnings) {
+      this.log?.warn(`[architect] war ledger inconsistency: ${w}`);
+    }
     const isPhase5Output = Boolean(output.storyFrame?.trim());
 
     if (mode === "revise" && !isPhase5Output) {
@@ -908,6 +1060,17 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
             : "# 情感弧线\n\n| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |\n|------|------|----------|----------|------------|----------|\n",
           "utf-8",
         ));
+        const allianceContent = output.allianceState?.trim()
+          ? output.allianceState
+          : (language === "en"
+              ? "# Alliance State\n\n> Seeded at book creation. Runtime faction/diplomacy changes are tracked by the settler via allianceOps.\n"
+              : "# 联盟局势\n\n> 建书时占位。运行时势力/外交变动由 settler 通过 allianceOps 追踪。\n");
+        writes.push(writeFile(join(storyDir, "alliance_state.md"), allianceContent, "utf-8"));
+        // war_ledgers — same parsing as Phase 5 path
+        const warLedgerFiles = this.parseWarLedgersSection(output.warLedgers ?? "");
+        for (const [filename, content] of warLedgerFiles) {
+          writes.push(writeFile(join(storyDir, filename), content, "utf-8"));
+        }
       }
 
       await Promise.all(writes);
@@ -983,6 +1146,34 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
           : "# 情感弧线\n\n| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |\n|------|------|----------|----------|------------|----------|\n",
         "utf-8",
       ));
+      // alliance_state.md — initial factions and diplomacy (empty seed if architect didn't emit)
+      const allianceContent = output.allianceState?.trim()
+        ? output.allianceState
+        : (language === "en"
+            ? "# Alliance State\n\n> Seeded at book creation. Runtime faction/diplomacy changes are tracked by the settler via allianceOps.\n"
+            : "# 联盟局势\n\n> 建书时占位。运行时势力/外交变动由 settler 通过 allianceOps 追踪。\n");
+      writes.push(writeFile(join(storyDir, "alliance_state.md"), allianceContent, "utf-8"));
+      // war_ledgers — 10 optional war/faction ledger files.
+      // Parsed from the single war_ledgers SECTION by splitting on ## headings.
+      // Only writes files that have actual data rows (not just headers).
+      const warLedgerFiles = this.parseWarLedgersSection(output.warLedgers ?? "");
+      for (const [filename, content] of warLedgerFiles) {
+        writes.push(writeFile(join(storyDir, filename), content, "utf-8"));
+      }
+      // Phase outline (阶段纲) — three-layer outline middle layer
+      const phaseOutline = output.phaseOutline?.trim()
+        ? output.phaseOutline
+        : (language === "en"
+            ? "# Phase Outline\n\n> Seeded at book creation. Phase goals are tracked by the chapter analyzer.\n"
+            : "# 阶段纲\n\n> 建书时占位。阶段目标由 chapter-analyzer 追踪完成度。\n");
+      writes.push(writeFile(join(outlineDir, "phase_outline.md"), phaseOutline, "utf-8"));
+      // Chapter skeleton (章纲骨架) — four-layer outline: per-chapter beats
+      const chapterSkeleton = output.chapterSkeleton?.trim()
+        ? output.chapterSkeleton
+        : (language === "en"
+            ? "# Chapter Skeleton\n\n> Seeded at book creation. Per-chapter beats will be populated by revise-foundation.\n"
+            : "# 章纲骨架\n\n> 建书时占位。逐章骨架将由 revise-foundation 填充。\n");
+      writes.push(writeFile(join(outlineDir, "chapter_skeleton.md"), chapterSkeleton, "utf-8"));
     }
 
     // Cleanup #2 (Option B): particle_ledger.md / subplot_board.md /
@@ -1058,7 +1249,7 @@ ${numericalBlock}
 ${continuationDirective}
 
 ## Output contract
-Follow the consolidated 5-section === SECTION: === layout: story_frame, volume_map, roles, book_rules, pending_hooks. Do NOT emit rhythm_principles or current_state — rhythm principles live in the last paragraph of volume_map; character initial status lives in roles.Current_State; initial hooks live in pending_hooks start_chapter=0 rows; era / setting anchors (only when the genre pins to a real year) are woven into story_frame's world-tonal-ground paragraph.
+Follow the consolidated 7-section === SECTION: === layout: story_frame, volume_map, roles, book_rules, pending_hooks, alliance_state, war_ledgers. Do NOT emit rhythm_principles or current_state — rhythm principles live in the last paragraph of volume_map; character initial status lives in roles.Current_State; initial hooks live in pending_hooks start_chapter=0 rows; era / setting anchors (only when the genre pins to a real year) are woven into story_frame's world-tonal-ground paragraph.
 
 All prose must be derived from the source package. Do not invent settings. If the package says it is compressed, treat chapter catalog + excerpts as evidence for the foundation; the full chapters will be replayed later for detailed truth files. For volume_map, treat existing chapters as "review" (one paragraph) and continuation as prose chapter-level planning. Hook extraction must be complete for the evidence provided.
 
@@ -1079,7 +1270,7 @@ ${numericalBlock}
 ${continuationDirective}
 
 ## 输出契约
-合并后的 5 段 === SECTION: === 结构：story_frame / volume_map / roles / book_rules / pending_hooks。**不要输出 rhythm_principles 或 current_state 两个 section**——节奏原则合并进 volume_map 尾段，角色初始状态合并进 roles.当前现状，初始钩子写在 pending_hooks startChapter=0 行；环境/时代锚（只有年代文 / 历史同人 / 都市重生等真实年份题材需要）织进 story_frame.世界观底色，其他题材直接省略。
+合并后的 7 段 === SECTION: === 结构：story_frame / volume_map / roles / book_rules / pending_hooks / alliance_state / war_ledgers。**不要输出 rhythm_principles 或 current_state 两个 section**——节奏原则合并进 volume_map 尾段，角色初始状态合并进 roles.当前现状，初始钩子写在 pending_hooks startChapter=0 行；环境/时代锚（只有年代文 / 历史同人 / 都市重生等真实年份题材需要）织进 story_frame.世界观底色，其他题材直接省略。
 
 所有 prose 必须从资料包中推导，不得臆造。若资料包声明为压缩包，把章节目录和正文摘录当作基础设定证据；完整章节会在后续回放阶段逐章进入 truth files。volume_map 中，已有章节作为"回顾段"（一段散文），续写部分写到章级 prose。伏笔识别以资料包提供的证据为准，尽量完整。`;
 
@@ -1132,7 +1323,7 @@ ${fanficCanon}
 ${genreBody}
 
 ## 输出契约
-严格按合并后的 5 段 === SECTION: === 块输出：story_frame / volume_map / roles / book_rules / pending_hooks。**不要输出 rhythm_principles 或 current_state**：节奏原则合并进 volume_map 尾段；角色初始状态写在 roles.当前现状，初始钩子写在 pending_hooks startChapter=0 行；环境/时代锚（仅当同人的原作/本作锚定真实年份时）织进 story_frame.世界观底色，其他情况省略。
+严格按合并后的 7 段 === SECTION: === 块输出：story_frame / volume_map / roles / book_rules / pending_hooks / alliance_state / war_ledgers。**不要输出 rhythm_principles 或 current_state**：节奏原则合并进 volume_map 尾段；角色初始状态写在 roles.当前现状，初始钩子写在 pending_hooks startChapter=0 行；环境/时代锚（仅当同人的原作/本作锚定真实年份时）织进 story_frame.世界观底色，其他情况省略。
 
 - 主要角色必须来自原作正典
 - 可添加原创配角，标注"原创"
@@ -1241,6 +1432,33 @@ ${trimmed}\n`;
     ].some((name) => normalized.includes(name))
       || /(当前状态|初始状态)/.test(heading)) {
       return "current_state";
+    }
+    if ([
+      "alliance_state",
+      "alliance",
+    ].some((name) => normalized.includes(name))
+      || /(联盟局势|联盟|势力阵营)/.test(heading)) {
+      return "alliance_state";
+    }
+    if ([
+      "war_ledgers",
+      "war_ledger",
+    ].some((name) => normalized.includes(name))
+      || /(战争账本|战事账本)/.test(heading)) {
+      return "war_ledgers";
+    }
+    if ([
+      "phase_outline",
+      "phase",
+    ].some((name) => normalized.includes(name))
+      || /(阶段纲|阶段大纲)/.test(heading)) {
+      return "phase_outline";
+    }
+    if ([
+      "chapter_skeleton",
+    ].some((name) => normalized.includes(name))
+      || /(章纲骨架|章纲)/.test(heading)) {
+      return "chapter_skeleton";
     }
     return null;
   }
@@ -1429,5 +1647,202 @@ ${trimmed}\n`;
     return language === "zh"
       ? `${trimmedNotes}（${trimmedSeed}）`
       : `${trimmedNotes} (${trimmedSeed})`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase outline regeneration
+  // -------------------------------------------------------------------------
+  /**
+   * Regenerate a single phase in the phase outline.
+   */
+  async regeneratePhase(
+    book: BookConfig,
+    phaseId: number,
+    currentPhaseOutlineRaw: string,
+    userFeedback: string,
+  ): Promise<string> {
+    const { profile: gp, body: genreBody } = await readGenreProfile(this.ctx.projectRoot, book.genre);
+    const resolvedLanguage = book.language ?? gp.language;
+    const isZh = resolvedLanguage !== "en";
+
+    const phases = this.parsePhaseOutlineForRegen(currentPhaseOutlineRaw);
+    const targetPhase = phases.find((p) => p.id === phaseId);
+    if (!targetPhase) {
+      throw new Error(`Phase ${phaseId} not found in current phase outline`);
+    }
+    if (targetPhase.status === "done") {
+      throw new Error(`Phase ${phaseId} is already completed and cannot be regenerated`);
+    }
+
+    const otherPhasesContext = phases
+      .filter((p) => p.id !== phaseId)
+      .map((p) => isZh
+        ? `### 阶段 ${p.id}：${p.title}（${p.chapters}）\n状态：${p.status}\n张力：${p.tension ?? "未设置"}\n目标：${(p.narrative_goals ?? []).join("；")}`
+        : `### Phase ${p.id}: ${p.title} (${p.chapters})\nStatus: ${p.status}\nTension: ${p.tension ?? "unset"}\nGoals: ${(p.narrative_goals ?? []).join("; ")}`)
+      .join("\n\n");
+
+    const genreSection = genreBody
+      ? (isZh
+          ? `\n\n## 类型规范\n${genreBody}`
+          : `\n\n## Genre conventions\n${genreBody}`)
+      : "";
+
+    const systemPrompt = isZh
+      ? `你是这本书的总架构师。用户对阶段纲的第 ${phaseId} 个阶段不满意，要求你重新生成这一个阶段。
+${genreSection}
+
+## 当前阶段纲的其他阶段（作为上下文，不要修改）
+${otherPhasesContext || "（无其他阶段）"}
+
+## 用户修改指令
+${userFeedback}
+
+## 输出要求
+只输出一个阶段的 YAML，格式如下（不要输出其他阶段，不要输出 markdown 包裹）：
+
+\`\`\`yaml
+  - id: ${phaseId}
+    title: "<阶段标题>"
+    chapters: "X-Y"
+    status: active 或 pending
+    tension: "升|平|降|升-平-升"
+    mustPayoff: [伏笔ID列表]
+    mustSetup: [伏笔ID列表]
+    narrative_goals:
+      - "目标1（可验证的状态变更）"
+      - "目标2"
+      - "目标3"
+    resource_constraints:
+      - "约束1"
+    war_ledger_snapshot:
+      - "快照1"
+\`\`\`
+
+## 约束
+- 目标必须从对应卷的 Key Results 分解而来，不能凭空编造
+- narrative_goals 必须是可验证的状态变更，不要写"变强"、"成长"
+- 不要指定具体章号任务（"第17章做XX"）——阶段纲只定目标
+- 与相邻阶段保持逻辑衔接
+- 保持与用户修改指令一致`
+      : `You are the architect of this book. The user is dissatisfied with phase ${phaseId} of the phase outline and wants you to regenerate it.
+${genreSection}
+
+## Other phases in the current outline (context only — do not modify)
+${otherPhasesContext || "(no other phases)"}
+
+## User revision instructions
+${userFeedback}
+
+## Output requirements
+Output only one phase in YAML format (no other phases, no markdown wrapping):
+
+\`\`\`yaml
+  - id: ${phaseId}
+    title: "<phase title>"
+    chapters: "X-Y"
+    status: active or pending
+    tension: "up|flat|down|up-flat-up"
+    mustPayoff: [hook IDs]
+    mustSetup: [hook IDs]
+    narrative_goals:
+      - "goal 1 (verifiable state change)"
+      - "goal 2"
+      - "goal 3"
+    resource_constraints:
+      - "constraint 1"
+    war_ledger_snapshot:
+      - "snapshot 1"
+\`\`\`
+
+## Constraints
+- Goals must decompose from the corresponding volume's Key Results
+- narrative_goals must be verifiable state changes, not vague growth
+- Do not prescribe specific chapter tasks — phase outline only sets goals
+- Maintain logical continuity with adjacent phases
+- Follow the user's revision instructions`;
+
+    const userMessage = isZh
+      ? `请重新生成阶段纲的第 ${phaseId} 个阶段。`
+      : `Regenerate phase ${phaseId} of the phase outline.`;
+
+    const response = await this.chat([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ], { temperature: 0.7 });
+
+    return response.content.trim();
+  }
+
+  /**
+   * Parse phase_outline.md into structured objects for regeneration context.
+   */
+  private parsePhaseOutlineForRegen(raw: string): ReadonlyArray<{
+    readonly id: number;
+    readonly title: string;
+    readonly chapters: string;
+    readonly status: string;
+    readonly tension?: string;
+    readonly narrative_goals?: readonly string[];
+  }> {
+    if (!raw?.trim()) return [];
+    let body = raw;
+    const fmMatch = raw.match(/^---\s*\n[\s\S]*?\n---\s*\n([\s\S]*)$/);
+    if (fmMatch) {
+      body = fmMatch[1] ?? raw;
+    }
+    const phases: Array<{
+      id: number;
+      title: string;
+      chapters: string;
+      status: string;
+      tension?: string;
+      narrative_goals: string[];
+    }> = [];
+    const lines = body.split("\n");
+    let current: typeof phases[number] | null = null;
+    let section: string | null = null;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const phaseMatch = trimmed.match(/^##\s*(?:Phase|阶段|第)\s*(\d+)\s*[:：]\s*(.+?)(?:\s*\(Ch\.(\d+)-(\d+)\)|\s*（第\s*(\d+)\s*-\s*(\d+)\s*章）)?$/i);
+      if (phaseMatch) {
+        if (current) phases.push(current);
+        current = {
+          id: parseInt(phaseMatch[1] ?? "0", 10),
+          title: (phaseMatch[2] ?? "").trim(),
+          chapters: phaseMatch[3] ? `${phaseMatch[3]}-${phaseMatch[4]}` : phaseMatch[5] ? `${phaseMatch[5]}-${phaseMatch[6]}` : "",
+          status: "pending",
+          tension: undefined,
+          narrative_goals: [],
+        };
+        section = null;
+        continue;
+      }
+      if (!current) continue;
+      const statusMatch = trimmed.match(/^\*\*status\*\*\s*[:：]\s*(active|pending|done)/i);
+      if (statusMatch) {
+        current.status = (statusMatch[1] ?? "pending").toLowerCase();
+        continue;
+      }
+      const tensionMatch = trimmed.match(/^\*\*tension\*\*\s*[:：]\s*(.+)/i);
+      if (tensionMatch) {
+        current.tension = (tensionMatch[1] ?? "").trim();
+        continue;
+      }
+      if (/^\*\*narrative_goals\*\*/i.test(trimmed)) { section = "goals"; continue; }
+      if (/^\*\*resource_constraints\*\*/i.test(trimmed)) { section = "constraints"; continue; }
+      if (/^\*\*war_ledger_snapshot\*\*/i.test(trimmed)) { section = "snapshot"; continue; }
+      if (section === "goals" && /^-\s*\[[ x]\]\s*(.+)/.test(trimmed)) {
+        const goalMatch = trimmed.match(/^-\s*\[[ x]\]\s*(.+)/);
+        if (goalMatch) current.narrative_goals.push((goalMatch[1] ?? "").trim());
+        continue;
+      }
+      if (section === "goals" && /^-\s+(.+)/.test(trimmed)) {
+        current.narrative_goals.push(trimmed.replace(/^-\s+/, ""));
+        continue;
+      }
+      if (/^##\s/.test(trimmed) && !phaseMatch) { section = null; }
+    }
+    if (current) phases.push(current);
+    return phases;
   }
 }

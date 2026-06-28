@@ -61,6 +61,16 @@ export function buildGovernedRuleStack(plan: PlanChapterOutput, chapterNumber: n
     });
   }
 
+  const activeCastSummary = extractActiveCastSummary(plan.memo?.body ?? plan.intent?.outlineNode ?? "");
+  if (activeCastSummary) {
+    activeOverrides.push({
+      from: "L4",
+      to: "L1",
+      target: `chapter:${chapterNumber}/activeCast`,
+      reason: truncateForOverrideReason(activeCastSummary),
+    });
+  }
+
   return RuleStackSchema.parse({
     layers: [
       { id: "L1", name: "hard_facts", precedence: 100, scope: "global" },
@@ -70,7 +80,7 @@ export function buildGovernedRuleStack(plan: PlanChapterOutput, chapterNumber: n
     ],
     sections: {
       // Phase 5 authoritative source names (was: story_bible, volume_outline).
-      hard: ["story_frame", "current_state", "book_rules", "roles"],
+      hard: ["story_frame", "current_state", "book_rules", "roles(active_cast_only)"],
       soft: ["author_intent", "current_focus", "volume_map"],
       diagnostic: ["anti_ai_checks", "continuity_audit", "style_regression_checks"],
     },
@@ -101,6 +111,7 @@ export function buildGovernedTrace(params: {
 
   return ChapterTraceSchema.parse({
     chapter: params.chapterNumber,
+    asOfChapter: params.contextPackage.asOfChapter,
     plannerInputs: params.plan.plannerInputs,
     composerInputs: params.composerInputs,
     selectedSources: params.contextPackage.selectedContext.map((entry) => entry.source),
@@ -141,4 +152,42 @@ function sumContextTokens(entries: ReadonlyArray<ContextPackage["selectedContext
 
 function estimateContextSourceTokens(entry: ContextPackage["selectedContext"][number]): number {
   return estimateTextTokens([entry.source, entry.reason, entry.excerpt].filter(Boolean).join("\n"));
+}
+
+function extractActiveCastSummary(memoBody: string): string {
+  const section = extractLooseSection(memoBody, ["本章出场人物", "Active Cast"]);
+  if (!section) {
+    return "";
+  }
+  const names: string[] = [];
+  for (const rawLine of section.split("\n")) {
+    const line = rawLine.trim();
+    const name = line.match(/^(?:[-*]\s*)?(?:name|姓名|角色|人物)\s*[:：]\s*(.+)$/i)?.[1]
+      ?? line.match(/^[-*]\s*([^：:，,|\s]+)\s*[：:]/)?.[1];
+    if (name) {
+      names.push(name.trim());
+    }
+  }
+  return names.length > 0
+    ? `active cast: ${names.slice(0, 8).join(", ")}`
+    : truncateForOverrideReason(section);
+}
+
+function extractLooseSection(content: string, headings: ReadonlyArray<string>): string {
+  const lines = content.split("\n");
+  const start = lines.findIndex((line) =>
+    headings.some((heading) => line.trim() === `## ${heading}` || line.trim() === `### ${heading}`),
+  );
+  if (start < 0) {
+    return "";
+  }
+  const section: string[] = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (/^#{2,3}\s/.test(line.trim())) {
+      break;
+    }
+    section.push(line);
+  }
+  return section.join("\n").trim();
 }

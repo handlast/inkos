@@ -30,7 +30,7 @@ export interface ChapterReviewCycleResult {
   readonly normalizeApplied: boolean;
 }
 
-const DEFAULT_MAX_REVIEW_ITERATIONS = 1;
+const DEFAULT_MAX_REVIEW_ITERATIONS = 2;
 const PASS_SCORE_THRESHOLD = 85;
 const NET_IMPROVEMENT_EPSILON = 3;
 
@@ -40,6 +40,30 @@ interface ReviewSnapshot {
   readonly auditResult: AuditResult;
   readonly score: number;
   readonly lengthInRange: boolean;
+}
+
+function isBlockingIssue(issue: AuditIssue): boolean {
+  return issue.severity === "critical" || issue.severity === "error" || issue.severity === "block";
+}
+
+function countSnapshotBlockers(snap: ReviewSnapshot): number {
+  const issueCount = snap.auditResult.issues.filter(isBlockingIssue).length;
+  return issueCount + (snap.lengthInRange ? 0 : 1);
+}
+
+function summarizeBlockingIssues(fallbackSummary: string, issues: ReadonlyArray<AuditIssue>): string {
+  const blockers = issues.filter(isBlockingIssue);
+  if (blockers.length === 0) {
+    return fallbackSummary;
+  }
+  const text = blockers
+    .slice(0, 3)
+    .map((issue) => [issue.category, issue.description].filter(Boolean).join(": "))
+    .join("；");
+  const hasCjk = /[一-鿿]/.test(text);
+  return hasCjk
+    ? `仍有 ${blockers.length} 个阻断问题：${text}`
+    : `Blocking issues remain (${blockers.length}): ${text}`;
 }
 
 export async function runChapterReviewCycle(params: {
@@ -65,6 +89,8 @@ export async function runChapterReviewCycle(params: {
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
         lengthSpec?: LengthSpec;
+        auditSummary?: string;
+        previousScore?: number;
       },
     ) => Promise<ReviseOutput>;
   };
@@ -183,10 +209,11 @@ export async function runChapterReviewCycle(params: {
     // lengthInRange is only used in isPassed() as a hard gate.
 
     const hasPostWriteCritical = postWriteIssues.some((i) => i.severity === "critical");
+    const hasCriticalAITell = aiTellsResult.issues.some((i) => i.severity === "critical");
     const auditResult: AuditResult = {
-      passed: (hasBlockedWords || hasPostWriteCritical) ? false : llmAudit.passed,
+      passed: (hasBlockedWords || hasPostWriteCritical || hasCriticalAITell) ? false : llmAudit.passed,
       issues: allIssues,
-      summary: llmAudit.summary,
+      summary: summarizeBlockingIssues(llmAudit.summary, allIssues),
       parseFailed: llmAudit.parseFailed,
       overallScore: llmAudit.overallScore,
     };
@@ -218,23 +245,6 @@ export async function runChapterReviewCycle(params: {
   let currentAudit = initial;
   let postReviseCount = 0;
 
-  if (initial.auditResult.parseFailed) {
-    params.logWarn({
-      zh: "审稿输出解析失败，跳过自动修稿以避免误改正文",
-      en: "Audit output parsing failed; skipping automatic repair to avoid rewriting valid prose from an unreliable audit.",
-    });
-    return {
-      finalContent,
-      finalWordCount,
-      preAuditNormalizedWordCount: finalWordCount,
-      revised: false,
-      auditResult: initial.auditResult,
-      totalUsage,
-      postReviseCount,
-      normalizeApplied,
-    };
-  }
-
   if (!isPassed(initial)) {
     for (let iteration = 0; iteration < maxReviewIterations; iteration++) {
       params.logStage({
@@ -250,7 +260,7 @@ export async function runChapterReviewCycle(params: {
         currentAudit.auditResult.issues,
         "auto",
         params.book.genre,
-        { ...params.reducedControlInput, lengthSpec: params.lengthSpec },
+        { ...params.reducedControlInput, lengthSpec: params.lengthSpec, auditSummary: currentAudit.auditResult?.summary, previousScore: currentAudit.score },
       );
       totalUsage = params.addUsage(totalUsage, reviseOutput.tokenUsage);
 
@@ -287,7 +297,7 @@ export async function runChapterReviewCycle(params: {
         });
         finalContent = revisedContent;
         finalWordCount = revisedWordCount;
-        postReviseCount = revisedWordCount;
+        postReviseCount = iteration + 1;
         currentAudit = nextAssessment;
         break;
       }
@@ -296,7 +306,7 @@ export async function runChapterReviewCycle(params: {
       if (nextAssessment.score >= currentAudit.score + NET_IMPROVEMENT_EPSILON) {
         finalContent = revisedContent;
         finalWordCount = revisedWordCount;
-        postReviseCount = revisedWordCount;
+        postReviseCount = iteration + 1;
         currentAudit = nextAssessment;
         // Continue to next iteration
       } else {
@@ -310,22 +320,36 @@ export async function runChapterReviewCycle(params: {
   }
 
   // ---------------------------------------------------------------------------
-  // Pick the best scoring snapshot for final output
+  // Pick the best snapshot for final output. A passing snapshot outranks any
+  // failed snapshot, even when the failed draft has a higher LLM score.
   // ---------------------------------------------------------------------------
-  const bestSnapshot = snapshots.reduce((best, snap) => {
-    if (snap.lengthInRange !== best.lengthInRange) {
-      return snap.lengthInRange ? snap : best;
+  const isSnapshotPassed = (snap: ReviewSnapshot): boolean =>
+    snap.auditResult.passed && snap.score >= PASS_SCORE_THRESHOLD && snap.lengthInRange;
+
+  const pickHigherScoring = (best: ReviewSnapshot, snap: ReviewSnapshot): ReviewSnapshot =>
+    snap.score >= best.score + NET_IMPROVEMENT_EPSILON ? snap : best;
+
+  const pickLeastBlocked = (best: ReviewSnapshot, snap: ReviewSnapshot): ReviewSnapshot => {
+    const bestBlockers = countSnapshotBlockers(best);
+    const snapBlockers = countSnapshotBlockers(snap);
+    if (snapBlockers !== bestBlockers) {
+      return snapBlockers < bestBlockers ? snap : best;
     }
-    return snap.score >= best.score + NET_IMPROVEMENT_EPSILON ? snap : best;
-  });
+    return pickHigherScoring(best, snap);
+  };
+
+  const passingSnapshots = snapshots.filter(isSnapshotPassed);
+  const bestSnapshot = passingSnapshots.length > 0
+    ? passingSnapshots.reduce(pickHigherScoring)
+    : snapshots.reduce(pickLeastBlocked);
 
   // If best snapshot differs from current content (repair made things worse
   // but an earlier version was better), roll back to the best version.
-  const shouldRestoreBestSnapshot = bestSnapshot.content !== finalContent && (
-    (bestSnapshot.lengthInRange && !currentAudit.lengthInRange)
-    || bestSnapshot.score >= currentAudit.score + NET_IMPROVEMENT_EPSILON
-  );
-  if (shouldRestoreBestSnapshot) {
+  const currentPassed = currentAudit.auditResult.passed && currentAudit.score >= PASS_SCORE_THRESHOLD && currentAudit.lengthInRange;
+  const bestBlockers = countSnapshotBlockers(bestSnapshot);
+  const currentBlockers = currentAudit.auditResult.issues.filter(isBlockingIssue).length + (currentAudit.lengthInRange ? 0 : 1);
+
+  if (bestSnapshot.content !== finalContent && ((isSnapshotPassed(bestSnapshot) && !currentPassed) || bestBlockers < currentBlockers || bestSnapshot.score > currentAudit.score)) {
     params.logWarn({
       zh: `回退到最高分版本（${bestSnapshot.score} 分 vs 当前 ${currentAudit.score} 分）`,
       en: `rolling back to highest-scoring version (${bestSnapshot.score} vs current ${currentAudit.score})`,
@@ -335,7 +359,7 @@ export async function runChapterReviewCycle(params: {
     currentAudit = {
       auditResult: bestSnapshot.auditResult,
       score: bestSnapshot.score,
-      lengthInRange: bestSnapshot.lengthInRange,
+      lengthInRange: !isOutsideHardRange(bestSnapshot.wordCount, params.lengthSpec),
     };
   }
 

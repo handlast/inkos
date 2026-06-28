@@ -2,12 +2,13 @@ import type { AuditIssue, AuditResult } from "../agents/continuity.js";
 import type { StateValidationAuthorityContext, ValidationResult, StateValidatorAgent } from "../agents/state-validator.js";
 import type { WriteChapterOutput, WriterAgent } from "../agents/writer.js";
 import type { BookConfig } from "../models/book.js";
-import type { ContextPackage, RuleStack } from "../models/input-governance.js";
+import type { ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { Logger } from "../utils/logger.js";
 import type { LengthLanguage } from "../utils/length-metrics.js";
 import {
   buildStateDegradedPersistenceOutput,
   retrySettlementAfterValidationFailure,
+  shouldRetryStateSettlement,
 } from "./chapter-state-recovery.js";
 
 export async function validateChapterTruthPersistence(params: {
@@ -28,6 +29,7 @@ export async function validateChapterTruthPersistence(params: {
   readonly authorityContext?: StateValidationAuthorityContext;
   readonly reducedControlInput?: {
     chapterIntent: string;
+    chapterMemo?: ChapterMemo;
     contextPackage: ContextPackage;
     ruleStack: RuleStack;
   };
@@ -98,7 +100,7 @@ export async function validateChapterTruthPersistence(params: {
     }
   }
 
-  if (!validation.passed) {
+  if (shouldRetryStateSettlement(validation)) {
     const recovery = await retrySettlementAfterValidationFailure({
       writer: params.writer,
       validator: params.validator,

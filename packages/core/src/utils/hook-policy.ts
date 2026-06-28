@@ -108,6 +108,7 @@ export const HOOK_HEALTH_DEFAULTS = {
   staleAfterChapters: 10,
   noAdvanceWindow: 5,
   newHookBurstThreshold: 2,
+  meltdownActiveHooks: 18,
 } as const;
 
 export function resolveHookVisibilityWindow(timing: HookPayoffTiming): number {

@@ -1,5 +1,6 @@
 import { readFile, readdir, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import YAML from "js-yaml";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import {
@@ -13,6 +14,7 @@ import {
   parseChapterSummariesMarkdown,
   retrieveMemorySelection,
 } from "../utils/memory-retrieval.js";
+import { readDynamicStoryFileAsOf } from "../state/runtime-state-store.js";
 import {
   buildGovernedRuleStack,
   buildGovernedTrace,
@@ -31,6 +33,8 @@ export interface ComposeChapterInput {
   readonly compressibleContextCompiler?: CompressibleContextCompiler;
   readonly outlineSectionSelector?: OutlineSectionSelector;
   readonly onContextCompression?: ContextCompressionCallback;
+  readonly asOfChapter?: number;
+  readonly asOfSnapshot?: number;
 }
 
 export interface ContextBudget {
@@ -84,9 +88,11 @@ export async function composeGovernedChapter(input: ComposeChapterInput): Promis
     input.plan,
     input.book.language ?? "zh",
     input.outlineSectionSelector,
+    { asOfChapter: input.asOfChapter, asOfSnapshot: input.asOfSnapshot },
   );
   const initialContextPackage = ContextPackageSchema.parse({
     chapter: input.chapterNumber,
+    asOfChapter: input.asOfChapter,
     selectedContext,
   });
   const budgeted = await applyContextBudgetIfNeeded({
@@ -244,6 +250,7 @@ async function applyContextBudgetIfNeeded(params: {
   return {
     contextPackage: ContextPackageSchema.parse({
       chapter: params.contextPackage.chapter,
+      asOfChapter: params.contextPackage.asOfChapter,
       selectedContext: [
         ...protectedEntries,
         {
@@ -431,8 +438,10 @@ async function collectSelectedContext(
   plan: PlanChapterOutput,
   language: "zh" | "en",
   outlineSectionSelector?: OutlineSectionSelector,
+  options?: { asOfChapter?: number; asOfSnapshot?: number },
 ): Promise<ContextPackage["selectedContext"]> {
     const retrievalHints = deriveRetrievalHints(plan);
+    const asOfChapter = options?.asOfChapter;
     const memoBodyExcerpt = plan.memo.body.trim();
     const chapterMemoEntry = memoBodyExcerpt.length > 0
       ? [{
@@ -457,15 +466,40 @@ async function collectSelectedContext(
         "author_intent.md",
         "User's long-term authorial intent and direction — binding, overrides model defaults.",
       ),
-      maybeContextSource(
-        storyDir,
-        "audit_drift.md",
-        "Carry forward audit drift guidance from the previous chapter without polluting hard state facts.",
-      ),
+      maybeAuditDriftSource(storyDir, plan.intent.chapter),
       maybeContextSource(
         storyDir,
         "current_state.md",
         "Preserve hard state facts referenced by the active chapter brief or hard constraints.",
+        retrievalHints,
+        undefined,
+        asOfChapter,
+      ),
+      maybeContextSource(
+        storyDir,
+        "alliance_state.md",
+        "Current faction alliances, diplomatic relations, and membership events. Writer must not contradict these states.",
+        [],
+        undefined,
+        asOfChapter,
+      ),
+      maybeContextSource(
+        storyDir,
+        "character_assets.md",
+        "Current character-held assets and their statuses. Writer must not invoke assets a character does not hold.",
+        [],
+        undefined,
+        asOfChapter,
+      ),
+      maybeContextSource(
+        storyDir,
+        "parent_canon.md",
+        "Preserve parent canon constraints for governed continuation or fanfic writing.",
+      ),
+      maybeContextSource(
+        storyDir,
+        "fanfic_canon.md",
+        "Preserve extracted fanfic canon constraints for governed writing.",
       ),
     ]);
     const outlineEntries = [
@@ -488,23 +522,13 @@ async function collectSelectedContext(
       outlineSectionSelector,
     ),
     ];
-    const canonEntries = await Promise.all([
-      maybeContextSource(
-        storyDir,
-        "parent_canon.md",
-        "Preserve parent canon constraints for governed continuation or fanfic writing.",
-      ),
-      maybeContextSource(
-        storyDir,
-        "fanfic_canon.md",
-        "Preserve extracted fanfic canon constraints for governed writing.",
-      ),
-    ]);
-    const trailEntries = await buildRecentChapterTrailEntries(storyDir, plan.intent.chapter);
+    const trailEntries = await buildRecentChapterTrailEntries(storyDir, plan.intent.chapter, asOfChapter);
 
     const memorySelection = await retrieveMemorySelection({
       bookDir: dirname(storyDir),
       chapterNumber: plan.intent.chapter,
+      asOfChapter,
+      asOfSnapshot: options?.asOfSnapshot,
       goal: plan.intent.goal,
       outlineNode: plan.intent.outlineNode,
       mustKeep: retrievalHints,
@@ -514,6 +538,7 @@ async function collectSelectedContext(
       plan,
       memorySelection.activeHooks,
       language,
+      asOfChapter,
     );
 
     const summaryEntries = memorySelection.summaries.map((summary) => ({
@@ -540,12 +565,13 @@ async function collectSelectedContext(
       reason: "Carry forward long-span arc memory compressed from earlier volumes.",
       excerpt: `${summary.heading} | ${summary.content}`,
     }));
+    const activeRoleEntries = await buildActiveRoleContextEntries(storyDir, plan.memo.body, language);
 
     return [
       ...chapterMemoEntry,
+      ...activeRoleEntries,
       ...entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
       ...outlineEntries,
-      ...canonEntries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
       ...trailEntries,
       ...hookDebtEntries,
       ...factEntries,
@@ -566,8 +592,11 @@ function deriveRetrievalHints(plan: PlanChapterOutput): string[] {
 async function buildRecentChapterTrailEntries(
   storyDir: string,
   chapterNumber: number,
+  asOfChapter?: number,
 ): Promise<ContextPackage["selectedContext"]> {
-    const content = await readFileOrDefault(join(storyDir, "chapter_summaries.md"));
+    const content = typeof asOfChapter === "number"
+      ? await readDynamicStoryFileAsOf(dirname(storyDir), asOfChapter, "chapter_summaries.md")
+      : await readFileOrDefault(join(storyDir, "chapter_summaries.md"));
     if (!content || content === "(文件尚未创建)") {
       return [];
     }
@@ -668,15 +697,17 @@ async function buildHookDebtEntries(
       readonly notes: string;
     }>,
   language: "zh" | "en",
+  asOfChapter?: number,
 ): Promise<ContextPackage["selectedContext"]> {
     const targetHookIds = [...new Set(plan.memo.threadRefs)];
     if (targetHookIds.length === 0) {
       return [];
     }
 
-    const summaries = parseChapterSummariesMarkdown(
-      await readFileOrDefault(join(storyDir, "chapter_summaries.md")),
-    );
+    const summariesMarkdown = typeof asOfChapter === "number"
+      ? await readDynamicStoryFileAsOf(dirname(storyDir), asOfChapter, "chapter_summaries.md")
+      : await readFileOrDefault(join(storyDir, "chapter_summaries.md"));
+    const summaries = parseChapterSummariesMarkdown(summariesMarkdown);
 
     return targetHookIds.flatMap((hookId) => {
       const hook = activeHooks.find((entry) => entry.hookId === hookId);
@@ -722,10 +753,17 @@ async function maybeContextSource(
   storyDir: string,
   fileName: string,
   reason: string,
+  preferredExcerpts: string[] = [],
+  sectionAnchor?: string,
+  asOfChapter?: number,
 ): Promise<ContextPackage["selectedContext"][number] | null> {
     const path = join(storyDir, fileName);
-    let content = await readFileOrDefault(path);
-    let resolvedFileName = fileName;
+    let content = typeof asOfChapter === "number"
+      ? await readDynamicStoryFileAsOf(dirname(storyDir), asOfChapter, fileName)
+      : await readFileOrDefault(path);
+    let resolvedFileName = typeof asOfChapter === "number"
+      ? `snapshots/${asOfChapter}/${fileName}`
+      : fileName;
 
     if ((!content || content === "(文件尚未创建)")) {
       // Phase 5 back-compat: the new outline/ files may be absent on legacy
@@ -743,10 +781,11 @@ async function maybeContextSource(
 
     if (!content || content === "(文件尚未创建)") return null;
 
+    const sectionContent = sectionAnchor ? extractSection(content, sectionAnchor) : null;
     return {
-      source: `story/${resolvedFileName}`,
+      source: sectionAnchor ? `story/${resolvedFileName}#${sectionAnchor}` : `story/${resolvedFileName}`,
       reason,
-      excerpt: content.trim(),
+      excerpt: sectionContent || pickExcerpt(content, preferredExcerpts),
     };
 }
 
@@ -1003,6 +1042,405 @@ function dedupeBySource(entries: ContextPackage["selectedContext"]): ContextPack
       seen.add(entry.source);
       return true;
     });
+}
+
+async function maybeAuditDriftSource(storyDir: string, chapterNumber: number): Promise<ContextPackage["selectedContext"][number] | null> {
+    const content = await readFileOrDefault(join(storyDir, "audit_drift.md"));
+    if (!content || content === "(文件尚未创建)") return null;
+    const { frontmatter, body } = parseFrontmatter(content);
+    const fm = frontmatter as Record<string, unknown> | undefined;
+    if (fm?.appliesToChapter !== chapterNumber) return null;
+    const sourceChapter = fm.sourceChapter;
+    return {
+        source: `story/audit_drift.md#applies-to-${chapterNumber}`,
+        reason: typeof sourceChapter === "number"
+            ? `Carry forward audit drift guidance from chapter ${sourceChapter} for this chapter only.`
+            : "Carry forward audit drift guidance for this chapter only.",
+        excerpt: pickExcerpt(body, []),
+    };
+}
+
+interface ParsedFrontmatter {
+    readonly frontmatter?: Record<string, unknown>;
+    readonly body: string;
+}
+
+function parseFrontmatter(content: string): ParsedFrontmatter {
+    const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+    if (!match) {
+        return { body: content };
+    }
+    try {
+        const parsed: unknown = YAML.load(match[1]!);
+        const frontmatter = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? parsed as Record<string, unknown>
+            : undefined;
+        return { frontmatter, body: match[2] ?? "" };
+    } catch {
+        return { body: content };
+    }
+}
+
+function pickExcerpt(content: string, preferredExcerpts: string[]): string {
+    for (const preferred of preferredExcerpts) {
+        if (preferred && content.includes(preferred)) return preferred;
+    }
+    return content
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0 && !line.startsWith("#")) ?? "";
+}
+
+function extractSection(content: string, anchor: string): string | null {
+    const lines = content.split("\n");
+    const idx = lines.findIndex((line) => line.trim() === `## ${anchor}`);
+    if (idx === -1) return null;
+    const section: string[] = [];
+    for (let i = idx + 1; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (/^##\s/.test(line.trim())) break;
+        section.push(line);
+    }
+    const result = section.join("\n").trim();
+    return result || null;
+}
+
+function castNameMatches(left: unknown, right: unknown): boolean {
+    if (!left || !right) return false;
+    const a = String(left).trim().toLowerCase();
+    const b = String(right).trim().toLowerCase();
+    if (a === b) return true;
+    const firstSeg = (s: string): string => s.split(/[·・•‧･\s]+/)[0] ?? s;
+    return a === firstSeg(b) || b === firstSeg(a);
+}
+
+interface ActiveCastEntry {
+    readonly name: string;
+    readonly presence?: string;
+    readonly dialoguePermission?: string;
+    readonly chapterFunction?: string;
+    readonly voiceFocus?: string;
+    readonly informationBoundary?: string;
+    readonly relationshipPressure?: string;
+    readonly mustNotDo?: string;
+    readonly [key: string]: string | undefined;
+}
+
+async function buildActiveRoleContextEntries(
+    storyDir: string,
+    memoBody: string,
+    language: "zh" | "en",
+): Promise<ContextPackage["selectedContext"]> {
+    const activeCast = extractActiveCastEntries(memoBody)
+        .filter((entry) => entry.name && entry.presence === "present");
+    if (activeCast.length === 0) {
+        return [];
+    }
+    const roleCards = await readRoleCards(storyDir);
+    return activeCast.flatMap((castEntry) => {
+        const roleCard = roleCards.find((card) => castNameMatches(card.name, castEntry.name));
+        if (!roleCard) {
+            return [];
+        }
+        return [{
+            source: `story/${roleCard.relativePath}`,
+            reason: language === "en"
+                ? "Active cast role card selected by the chapter memo."
+                : "由本章出场人物清单选中的人物卡。",
+            excerpt: compressRoleCardForChapter(roleCard.content, castEntry, language),
+        }];
+    });
+}
+
+function extractActiveCastEntries(memoBody: string): ActiveCastEntry[] {
+    const section = extractLooseSection(memoBody, ["本章出场人物", "Active Cast"]);
+    if (!section) {
+        return [];
+    }
+    const tableEntries = extractActiveCastTableEntries(section);
+    const entries: ActiveCastEntry[] = [...tableEntries];
+    let current: Record<string, string> | undefined;
+    for (const rawLine of section.split("\n")) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("|")) {
+            continue;
+        }
+        const nameMatch = line.match(/^(?:[-*]\s*)?(?:name|姓名|角色|人物)\s*[:：]\s*(.+)$/i);
+        if (nameMatch) {
+            if (current?.name) {
+                entries.push(current as ActiveCastEntry);
+            }
+            current = { name: normalizeCastValue(nameMatch[1]!) };
+            continue;
+        }
+        const inlineEntry = extractInlineCastEntry(line);
+        if (inlineEntry) {
+            if (current?.name) {
+                entries.push(current as ActiveCastEntry);
+                current = undefined;
+            }
+            entries.push(inlineEntry);
+            continue;
+        }
+        if (!current) {
+            continue;
+        }
+        const fieldMatch = line.match(/^(?:[-*]\s*)?(presence|出场状态|dialoguePermission|对话权限|chapterFunction|本章功能|voiceFocus|声音重点|informationBoundary|信息边界|relationshipPressure|关系压力|mustNotDo|禁止表现)\s*[:：]\s*(.+)$/i);
+        if (!fieldMatch) {
+            continue;
+        }
+        const key = normalizeCastKey(fieldMatch[1]!);
+        current[key] = normalizeCastValue(fieldMatch[2]!);
+    }
+    if (current?.name) {
+        entries.push(current as ActiveCastEntry);
+    }
+    const deduped = new Map<string, ActiveCastEntry>();
+    for (const entry of entries) {
+        if (!entry.name) {
+            continue;
+        }
+        const normalized: ActiveCastEntry = {
+            ...entry,
+            presence: normalizePresence(entry.presence),
+        };
+        const existing = deduped.get(normalized.name);
+        deduped.set(normalized.name, { ...(existing ?? {}), ...normalized });
+    }
+    return [...deduped.values()];
+}
+
+function extractActiveCastTableEntries(section: string): ActiveCastEntry[] {
+    const rows = section.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("|") && !/^\|?\s*-+\s*\|/.test(line));
+    if (rows.length < 2) {
+        return [];
+    }
+    const headers = parseMarkdownRow(rows[0]!).map(normalizeCastHeader);
+    return rows.slice(1).flatMap((row) => {
+        const cells = parseMarkdownRow(row);
+        const entry: Record<string, string> = {};
+        headers.forEach((header, index) => {
+            if (!header || !cells[index]) {
+                return;
+            }
+            entry[header] = normalizeCastValue(cells[index]!);
+        });
+        return entry.name ? [entry as ActiveCastEntry] : [];
+    });
+}
+
+function parseMarkdownRow(line: string): string[] {
+    return line.split("|").slice(1, -1).map((cell) => cell.trim());
+}
+
+function normalizeCastHeader(header: string): string {
+    const key = header.trim();
+    if (/^(name|姓名|角色|人物)$/i.test(key)) return "name";
+    if (/^(presence|出场状态)$/i.test(key)) return "presence";
+    if (/^(dialoguePermission|对话权限)$/i.test(key)) return "dialoguePermission";
+    if (/^(chapterFunction|本章功能)$/i.test(key)) return "chapterFunction";
+    if (/^(voiceFocus|声音重点)$/i.test(key)) return "voiceFocus";
+    if (/^(informationBoundary|信息边界)$/i.test(key)) return "informationBoundary";
+    if (/^(relationshipPressure|关系压力)$/i.test(key)) return "relationshipPressure";
+    if (/^(mustNotDo|禁止表现)$/i.test(key)) return "mustNotDo";
+    return "";
+}
+
+function extractInlineCastEntry(line: string): ActiveCastEntry | null {
+    const name = line.match(/^[-*]\s*([^：:，,|\s]+)\s*[：:]/)?.[1];
+    if (!name) {
+        return null;
+    }
+    const entry: Record<string, string> = { name: normalizeCastValue(name) };
+    const fieldPattern = /(presence|出场状态|dialoguePermission|对话权限|chapterFunction|本章功能|voiceFocus|声音重点|informationBoundary|信息边界|relationshipPressure|关系压力|mustNotDo|禁止表现)\s*[:：]\s*([^|，,；;]+)/gi;
+    let match: RegExpExecArray | null;
+    while ((match = fieldPattern.exec(line)) !== null) {
+        entry[normalizeCastKey(match[1]!)] = normalizeCastValue(match[2]!);
+    }
+    if (!entry.presence) {
+        if (/不出场|offstage|未出场|幕后/i.test(line)) {
+            entry.presence = "offstage";
+        } else if (/提及|mentioned/i.test(line)) {
+            entry.presence = "mentioned";
+        } else if (/出场|在场|present/i.test(line)) {
+            entry.presence = "present";
+        }
+    }
+    return entry as ActiveCastEntry;
+}
+
+function extractLooseSection(content: string, headings: ReadonlyArray<string>): string {
+    const lines = content.split("\n");
+    const start = lines.findIndex((line) => headings.some((heading) => line.trim() === `## ${heading}` || line.trim() === `### ${heading}`));
+    if (start < 0) {
+        return "";
+    }
+    const section: string[] = [];
+    for (let i = start + 1; i < lines.length; i += 1) {
+        const line = lines[i]!;
+        if (/^#{2,3}\s/.test(line.trim())) {
+            break;
+        }
+        section.push(line);
+    }
+    return section.join("\n").trim();
+}
+
+function normalizeCastKey(key: string): string {
+    const normalized = key.toLowerCase();
+    if (normalized === "出场状态") return "presence";
+    if (normalized === "对话权限") return "dialoguePermission";
+    if (normalized === "本章功能") return "chapterFunction";
+    if (normalized === "声音重点") return "voiceFocus";
+    if (normalized === "信息边界") return "informationBoundary";
+    if (normalized === "关系压力") return "relationshipPressure";
+    if (normalized === "禁止表现") return "mustNotDo";
+    return key;
+}
+
+function normalizeCastValue(value: string): string {
+    return value.replace(/^[-*]\s*/, "").trim();
+}
+
+function normalizePresence(value: unknown): string {
+    const normalized = String(value ?? "").toLowerCase();
+    if (normalized.includes("offstage") || normalized.includes("不出场") || normalized.includes("未出场") || normalized.includes("幕后")) {
+        return "offstage";
+    }
+    if (normalized.includes("mentioned") || normalized.includes("提及")) {
+        return "mentioned";
+    }
+    if (normalized.includes("present") || normalized.includes("出场") || normalized.includes("在场")) {
+        return "present";
+    }
+    return normalized;
+}
+
+interface RoleCard {
+    readonly name: string;
+    readonly relativePath: string;
+    readonly content: string;
+}
+
+async function readRoleCards(storyDir: string): Promise<ReadonlyArray<RoleCard>> {
+    const rolesDir = join(storyDir, "roles");
+    const cards: RoleCard[] = [];
+    try {
+        const tiers = await readdir(rolesDir, { withFileTypes: true });
+        for (const tier of tiers) {
+            if (!tier.isDirectory()) {
+                continue;
+            }
+            const tierDir = join(rolesDir, tier.name);
+            const files = await readdir(tierDir, { withFileTypes: true });
+            for (const file of files) {
+                if (!file.isFile() || !file.name.endsWith(".md")) {
+                    continue;
+                }
+                const absolutePath = join(tierDir, file.name);
+                const content = await readFile(absolutePath, "utf-8");
+                cards.push({
+                    name: file.name.replace(/\.md$/i, ""),
+                    relativePath: `roles/${tier.name}/${file.name}`,
+                    content,
+                });
+            }
+        }
+    } catch {
+        return [];
+    }
+    return cards;
+}
+
+function compressRoleCardForChapter(content: string, castEntry: ActiveCastEntry, language: "zh" | "en"): string {
+    const anchors = language === "en"
+        ? [
+            "One-line living anchor",
+            "Basic info",
+            "Personality",
+            "Inner profile",
+            "Core desire",
+            "Core fear",
+            "Image",
+            "Childhood",
+            "Environmental influence",
+            "Goals and regrets",
+            "Protagonist arc",
+            "Growth arc",
+            "Social relations",
+            "Relationship network",
+            "Relationship modulation",
+            "Emotional state",
+            "Romance dynamics",
+            "Romance conflicts",
+            "Special companion",
+            "Ability setup",
+            "Action principle",
+            "Action pattern",
+            "Contrast detail",
+            "Secrets",
+            "Information boundary",
+            "Verbal tics and habits",
+            "Voice",
+            "Dialogue samples",
+            "Forbidden phrases",
+            "Inner monologue vs spoken line",
+            "Current status",
+            "Back story",
+        ]
+        : [
+            "一句话活人锚点",
+            "基本信息",
+            "性格设定",
+            "内心侧写",
+            "核心欲望",
+            "核心恐惧",
+            "形象",
+            "童年经历",
+            "环境影响",
+            "目标与遗憾",
+            "主角弧线",
+            "主角弧线（起点 → 终点 → 代价）",
+            "成长弧光",
+            "社交关系",
+            "关系网络",
+            "关系变调",
+            "情感状态",
+            "恋爱相处",
+            "恋爱矛盾",
+            "特殊伙伴",
+            "能力设定",
+            "行动原理",
+            "行动惯性",
+            "反差细节",
+            "秘密",
+            "信息边界",
+            "口头禅习惯",
+            "说话风格",
+            "台词样本",
+            "禁用句式",
+            "内心独白 vs 出口台词",
+            "当前现状",
+            "当前现状（第 0 章初始状态）",
+            "人物小传（过往经历）",
+        ];
+    const sections = anchors
+        .map((anchor) => {
+            const section = extractSection(content, anchor);
+            return section ? `## ${anchor}\n${section}` : undefined;
+        })
+        .filter(Boolean)
+        .join("\n\n");
+    const castNotes = [
+        castEntry.chapterFunction ? `chapterFunction=${castEntry.chapterFunction}` : undefined,
+        castEntry.dialoguePermission ? `dialoguePermission=${castEntry.dialoguePermission}` : undefined,
+        castEntry.voiceFocus ? `voiceFocus=${castEntry.voiceFocus}` : undefined,
+        castEntry.informationBoundary ? `informationBoundary=${castEntry.informationBoundary}` : undefined,
+        castEntry.relationshipPressure ? `relationshipPressure=${castEntry.relationshipPressure}` : undefined,
+        castEntry.mustNotDo ? `mustNotDo=${castEntry.mustNotDo}` : undefined,
+    ].filter(Boolean).join(" | ");
+    const body = sections || content.split("\n").filter((line) => line.trim()).slice(0, 30).join("\n");
+    return [castNotes, body].filter(Boolean).join("\n\n").slice(0, 4500);
 }
 
 function outlineFallback(fileName: string): string | null {

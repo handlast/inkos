@@ -6,6 +6,18 @@ export const ChapterMemoSchema = z.object({
   isGoldenOpening: z.boolean().default(false),
   body: z.string().min(1),
   threadRefs: z.array(z.string()).default([]),
+  // Structured task-card fields (extracted from body or YAML frontmatter)
+  chapterObjective: z.string().optional(),
+  sceneSituation: z.string().optional(),
+  protagonistVisibleIntent: z.string().optional(),
+  immediateStakes: z.string().optional(),
+  conflictDriver: z.string().optional(),
+  exitStateChange: z.string().optional(),
+  forbiddenMoves: z.array(z.string()).default([]),
+  castBudget: z.string().optional(),
+  // Field-relevance tags: planner declares which data categories this chapter
+  // touches. Writer uses these to conditionally inject context.
+  relevantFields: z.array(z.string()).default([]),
 });
 
 export type ChapterMemo = z.infer<typeof ChapterMemoSchema>;
@@ -32,6 +44,7 @@ export type ContextSource = z.infer<typeof ContextSourceSchema>;
 
 export const ContextPackageSchema = z.object({
   chapter: z.number().int().min(1),
+  asOfChapter: z.number().int().min(0).optional(),
   selectedContext: z.array(ContextSourceSchema).default([]),
 });
 
@@ -90,6 +103,7 @@ export type RuleStack = z.infer<typeof RuleStackSchema>;
 
 export const ChapterTraceSchema = z.object({
   chapter: z.number().int().min(1),
+  asOfChapter: z.number().int().min(0).optional(),
   plannerInputs: z.array(z.string()),
   composerInputs: z.array(z.string()),
   selectedSources: z.array(z.string()),

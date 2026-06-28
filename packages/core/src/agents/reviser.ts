@@ -656,6 +656,7 @@ const STRUCTURAL_PATTERNS: ReadonlyArray<RegExp> = [
   /POV Consistency|视角/i,
   /Subplot Stagnation|支线停滞|Arc Flatline|弧线平坦/i,
   /Relationship Dynamics|关系动态|情感表达/i,
+  /Reader Clarity|读者清晰度|场景读不懂|意图缺失|眼前代价|绕弯子|谜语句|过度省略|信息含混|电报体|台词同质|全员惜字如金|Telegraph paragraphing|Dialogue voice collapse|Expository report tone|Abstract conclusion beats|说明书腔|空泛结论句|concept overload|术语过载|新概念过载|专名过密|读者抓手|动作逻辑|地形逻辑|规则逻辑|因果链|连续承压|缺少反制|被动挨打|没有落点|潜台词过密|行话过密/i,
   /Incentive Chain|利益链/i,
   /Canon Event|正典|Mainline Canon/i,
 ];

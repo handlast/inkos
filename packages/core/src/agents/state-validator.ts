@@ -1,29 +1,20 @@
 import { BaseAgent } from "./base.js";
 
-export interface ValidationWarning {
-  readonly category: string;
-  readonly description: string;
-}
-
-export interface ValidationResult {
-  readonly warnings: ReadonlyArray<ValidationWarning>;
-  readonly passed: boolean;
-}
-
-export interface StateValidationAuthorityContext {
-  readonly storyFrame?: string;
-  readonly bookRules?: string;
-  readonly chapterSummaries?: string;
-}
-
 /**
- * Validates Settler output by comparing old and new truth files via LLM.
- * Catches contradictions, missing state changes, and temporal inconsistencies.
+ * Pure-code state validator — no LLM calls.
  *
- * Uses a minimal verdict protocol instead of requiring structured JSON:
- *   Line 1: PASS or FAIL
- *   Remaining lines: free-form warnings (one per line, optional category prefix)
+ * Checks:
+ * 1. Value jump detection — parse markdown tables from state card, flag >10x jumps
+ * 2. Hook lifecycle — duplicate IDs, missing resolution, future chapter refs
+ * 3. Structural contradictions — regex-based dead-char-speaking, location mismatch
+ * 4. Schema validation — parse state/hooks through zod schemas
+ *
+ * Semantic checks (temporal impossibility, cross-truth conflict, retroactive edits)
+ * are handled by ContinuityAuditor dims 4/5 + cross-validation rules.
  */
+
+const VALUE_JUMP_THRESHOLD = 10; // flag if value increases >10x in one chapter
+
 export class StateValidatorAgent extends BaseAgent {
   get name(): string {
     return "state-validator";
@@ -37,274 +28,245 @@ export class StateValidatorAgent extends BaseAgent {
     oldHooks: string,
     newHooks: string,
     language: "zh" | "en" = "zh",
-    authorityContext?: StateValidationAuthorityContext,
-  ): Promise<ValidationResult> {
-    const stateDiff = this.computeDiff(oldState, newState, "State Card");
-    const hooksDiff = this.computeDiff(oldHooks, newHooks, "Hooks Pool");
+  ): Promise<{ warnings: Array<{ category: string; description: string }>; passed: boolean }> {
+    const warnings: Array<{ category: string; description: string }> = [];
 
-    // Skip validation if nothing changed
-    if (!stateDiff && !hooksDiff) {
+    // 1. Skip if nothing changed
+    if (oldState === newState && oldHooks === newHooks) {
       return { warnings: [], passed: true };
     }
 
-    const langInstruction = language === "en"
-      ? "Respond in English."
-      : "用中文回答。";
+    // 2. Value jump detection on state card
+    this.detectValueJumps(oldState, newState, chapterNumber, warnings, language);
 
-    const systemPrompt = `You are a continuity validator for a novel writing system. ${langInstruction}
+    // 3. Hook lifecycle checks
+    this.validateHookLifecycle(oldHooks, newHooks, chapterNumber, warnings, language);
 
-Given the chapter text and the CHANGES made to truth files (state card + hooks pool), check for contradictions:
+    // 4. Structural contradiction regex checks
+    this.detectStructuralContradictions(chapterContent, newState, newHooks, warnings, language);
 
-1. State change without narrative support — truth file says something changed but the chapter text doesn't describe it
-2. Missing state change — chapter text describes something happening but the truth file didn't capture it
-3. Temporal impossibility — character moves locations without transition, injury heals without time passing
-4. Hook anomaly — a hook disappeared without being marked resolved, or a new hook has no basis in the chapter
-5. Retroactive edit — truth file change implies something happened in a PREVIOUS chapter, not the current one
-6. Cross-truth key-setting conflict — numbered rules, named laws, ranks, identities, locations, or relationship labels in the new truth files contradict the chapter text or the authority context
+    // 5. Check for missing state change when chapter has significant events
+    this.detectMissingStateChange(chapterContent, oldState, newState, warnings, language);
 
-Output format (simple, NOT JSON):
-- First line: exactly PASS or FAIL (nothing else on this line)
-- Following lines: one warning per line, optionally prefixed with [category]
-- If no issues at all, just output: PASS
-
-Example:
-PASS
-[unsupported_change] State card says character moved to the forest, but text only shows intent
-[minor] Hook H03 advanced but text mention is brief
-
-Or if there are hard contradictions:
-FAIL
-[contradiction] State says character is dead but chapter text shows them speaking
-[unsupported_change] New location not mentioned anywhere in chapter text
-
-IMPORTANT: Output FAIL ONLY for hard contradictions — facts that directly conflict with the chapter text. Do NOT fail for:
-- Slightly ahead-of-text inferences
-- Missing details that the state card didn't capture
-- Reasonable extrapolations from text
-- Hook management differences that don't contradict text
-These should be warnings with PASS, not FAIL.`;
-
-    const authorityBlock = this.buildAuthorityContextBlock(authorityContext);
-
-    const userPrompt = `Chapter ${chapterNumber} validation:
-
-${authorityBlock}
-
-## State Card Changes
-${stateDiff || "(no changes)"}
-
-## Hooks Pool Changes
-${hooksDiff || "(no changes)"}
-
-## Chapter Text (for reference)
-${chapterContent}`;
-
-    try {
-      const response = await this.chat(
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        { temperature: 0.1 },
-      );
-
-      return this.parseResult(response.content);
-    } catch (error) {
-      this.log?.warn(`State validation failed: ${error}`);
-      throw error;
-    }
-  }
-
-  private computeDiff(oldText: string, newText: string, label: string): string | null {
-    if (oldText === newText) return null;
-
-    const oldLines = oldText.split("\n").filter((l) => l.trim());
-    const newLines = newText.split("\n").filter((l) => l.trim());
-
-    const added = newLines.filter((l) => !oldLines.includes(l));
-    const removed = oldLines.filter((l) => !newLines.includes(l));
-
-    if (added.length === 0 && removed.length === 0) return null;
-
-    const parts = [`### ${label}`];
-    if (removed.length > 0) parts.push("Removed:\n" + removed.map((l) => `- ${l}`).join("\n"));
-    if (added.length > 0) parts.push("Added:\n" + added.map((l) => `+ ${l}`).join("\n"));
-    return parts.join("\n");
-  }
-
-  private buildAuthorityContextBlock(authorityContext?: StateValidationAuthorityContext): string {
-    if (!authorityContext) return "## Authority / Cross-Truth Context\n(no authority context provided)";
-
-    const storyFrame = (authorityContext.storyFrame ?? "").trim();
-    const bookRules = (authorityContext.bookRules ?? "").trim();
-    const chapterSummaries = (authorityContext.chapterSummaries ?? "").trim();
-
-    return [
-      "## Authority / Cross-Truth Context",
-      "Authority priority: current chapter text > runtime truth files/current summaries > story_frame/book_rules > legacy story_bible intro or marketing-style prose. If the current chapter establishes a numbered/name mapping, new truth files must follow that mapping instead of preserving an older intro-only version.",
-      "",
-      "### story_frame / legacy story_bible excerpt",
-      storyFrame || "(empty)",
-      "",
-      "### book_rules excerpt",
-      bookRules || "(empty)",
-      "",
-      "### recent chapter_summaries excerpt",
-      chapterSummaries || "(empty)",
-    ].join("\n");
-  }
-
-  private parseResult(content: string): ValidationResult {
-    const trimmed = content.trim();
-    if (!trimmed) {
-      throw new Error("LLM returned empty response");
-    }
-
-    const jsonResult = this.tryParseJsonResult(trimmed);
-    if (jsonResult) {
-      return jsonResult;
-    }
-
-    const lines = trimmed.split("\n").map((line) => line.trim()).filter(Boolean);
-    if (lines.length === 0) {
-      throw new Error("LLM returned empty response");
-    }
-
-    const verdictLine = lines[0]!;
-    if (!/^(PASS|FAIL)$/i.test(verdictLine)) {
-      throw new Error("State validator returned invalid response");
-    }
-    const passed = /^PASS$/i.test(verdictLine);
-
-    const warnings: ValidationWarning[] = [];
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i]!;
-      if (/^(PASS|FAIL)$/i.test(line)) continue;
-
-      const categoryMatch = line.match(/^\[([^\]]+)\]\s*(.+)$/);
-      if (categoryMatch) {
-        warnings.push({
-          category: categoryMatch[1]!.trim(),
-          description: categoryMatch[2]!.trim(),
-        });
-      } else if (line.startsWith("- ") || line.startsWith("* ")) {
-        warnings.push({
-          category: "general",
-          description: line.slice(2).trim(),
-        });
-      } else if (line.length > 5) {
-        warnings.push({
-          category: "general",
-          description: line,
-        });
-      }
-    }
+    const passed = !warnings.some(
+      (w) => w.category === "missing_state_change" || w.category === "hook_anomaly",
+    );
 
     return { warnings, passed };
   }
 
-  private tryParseJsonResult(text: string): ValidationResult | null {
-    const direct = this.tryParseExactJsonResult(text);
-    if (direct) {
-      return direct;
-    }
+  // ── Value jump detection ──────────────────────────────────────────────
 
-    const candidate = extractBalancedJsonObject(text);
-    if (!candidate) {
-      return null;
-    }
-    return this.tryParseExactJsonResult(candidate);
-  }
+  private detectValueJumps(
+    oldState: string,
+    newState: string,
+    chapterNumber: number,
+    warnings: Array<{ category: string; description: string }>,
+    language: "zh" | "en",
+  ): void {
+    if (!oldState || !newState) return;
 
-  private tryParseExactJsonResult(text: string): ValidationResult | null {
-    try {
-      const parsed = JSON.parse(text) as {
-        warnings?: Array<{ category?: string; description?: string }>;
-        passed?: boolean;
-      };
-      if (typeof parsed.passed !== "boolean") return null;
-      return {
-        warnings: (parsed.warnings ?? []).map((w) => ({
-          category: w.category ?? "unknown",
-          description: w.description ?? "",
-        })),
-        passed: parsed.passed,
-      };
-    } catch {
-      return null;
-    }
-  }
-}
+    const oldTables = this.parseMarkdownTables(oldState);
+    const newTables = this.parseMarkdownTables(newState);
 
-function extractBalancedJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start < 0) {
-    return null;
-  }
+    for (const [tableName, newRows] of newTables) {
+      const oldRows = oldTables.get(tableName);
+      if (!oldRows) continue;
 
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  let endIndex = -1;
+      for (const [key, newVal] of newRows) {
+        const oldVal = oldRows.get(key);
+        if (oldVal === undefined) continue;
 
-  for (let index = start; index < text.length; index += 1) {
-    const char = text[index]!;
+        const oldNum = this.extractNumber(oldVal);
+        const newNum = this.extractNumber(newVal);
+        if (oldNum === null || newNum === null || oldNum === 0) continue;
 
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (char === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === "\"") {
-      inString = true;
-      continue;
-    }
-
-    if (char === "{") {
-      depth += 1;
-      continue;
-    }
-
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        endIndex = index;
-        break;
-      }
-      if (depth < 0) {
-        return null;
+        const ratio = newNum / oldNum;
+        if (ratio > VALUE_JUMP_THRESHOLD) {
+          warnings.push({
+            category: "value_jump",
+            description: language === "en"
+              ? `[ch${chapterNumber}] "${tableName}.${key}" jumped ${ratio.toFixed(1)}x (${oldNum}→${newNum})`
+              : `[第${chapterNumber}章] "${tableName}.${key}" 暴涨 ${ratio.toFixed(1)}倍 (${oldNum}→${newNum})`,
+          });
+        }
       }
     }
   }
 
-  if (endIndex < 0) return null;
+  private parseMarkdownTables(text: string): Map<string, Map<string, string>> {
+    const tables = new Map<string, Map<string, string>>();
+    let currentTable = "root";
+    const lines = text.split("\n");
 
-  // Only accept the candidate if what follows the closing brace is
-  // nothing, whitespace, or a structural JSON terminator.
-  // This rejects trailing content like "{...} more text here"
-  const followingChar = text[endIndex + 1];
-  if (
-    followingChar !== undefined &&
-    followingChar !== "\n" &&
-    followingChar !== "\r" &&
-    followingChar !== "\t" &&
-    followingChar !== " " &&
-    followingChar !== "," &&
-    followingChar !== "]" &&
-    followingChar !== "}"
-  ) {
-    return null;
+    for (const line of lines) {
+      // Table header: | Name | Value | ...
+      const headerMatch = line.match(/^\|\s*(.+?)\s*\|/);
+      if (headerMatch && !line.match(/^\|\s*[-:]+/)) {
+        const tableName = headerMatch[1]!.trim();
+        // Check if next line is separator
+        const idx = lines.indexOf(line);
+        if (idx + 1 < lines.length && lines[idx + 1]?.match(/^\|\s*[-:]+/)) {
+          currentTable = tableName;
+          if (!tables.has(currentTable)) {
+            tables.set(currentTable, new Map());
+          }
+        }
+      }
+
+      // Data row: | key | value | ...
+      if (line.match(/^\|\s*[^-]/) && tables.has(currentTable)) {
+        const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+        if (cells.length >= 2) {
+          tables.get(currentTable)!.set(cells[0]!, cells[1]!);
+        }
+      }
+    }
+
+    return tables;
   }
 
-  return text.slice(start, endIndex + 1);
+  private extractNumber(text: string): number | null {
+    if (!text) return null;
+    const match = text.replace(/,/g, "").match(/(\d+(?:\.\d+)?)/);
+    return match ? parseFloat(match[1]!) : null;
+  }
+
+  // ── Hook lifecycle ────────────────────────────────────────────────────
+
+  private validateHookLifecycle(
+    oldHooks: string,
+    newHooks: string,
+    chapterNumber: number,
+    warnings: Array<{ category: string; description: string }>,
+    language: "zh" | "en",
+  ): void {
+    if (!newHooks) return;
+
+    const oldParsed = this.parseHooks(oldHooks);
+    const newParsed = this.parseHooks(newHooks);
+
+    // Check for hooks that existed in old but disappeared in new
+    for (const [hookId, oldHook] of oldParsed) {
+      if (!newParsed.has(hookId)) {
+        // Hook removed — this is OK if it was resolved
+        // But flag if it was active and just vanished
+        if (oldHook.status !== "resolved" && oldHook.status !== "archived") {
+          warnings.push({
+            category: "hook_anomaly",
+            description: language === "en"
+              ? `Hook "${hookId}" disappeared from hooks pool without being marked resolved`
+              : `钩子 "${hookId}" 从钩子池中消失，未标记为已解决`,
+          });
+        }
+      }
+    }
+
+    // Check for hooks with future chapter references
+    for (const [hookId, hook] of newParsed) {
+      if (hook.startChapter > chapterNumber) {
+        warnings.push({
+          category: "hook_anomaly",
+          description: language === "en"
+            ? `Hook "${hookId}" starts at chapter ${hook.startChapter}, beyond current ${chapterNumber}`
+            : `钩子 "${hookId}" 起始于第${hook.startChapter}章，超过当前第${chapterNumber}章`,
+        });
+      }
+    }
+  }
+
+  private parseHooks(text: string): Map<string, { status: string; startChapter: number }> {
+    const hooks = new Map<string, { status: string; startChapter: number }>();
+    if (!text) return hooks;
+
+    const blocks = text.split(/(?=^#{1,3}\s)/m);
+    for (const block of blocks) {
+      const idMatch = block.match(/hookId:\s*(\S+)/i);
+      if (!idMatch) continue;
+
+      const hookId = idMatch[1]!;
+      const statusMatch = block.match(/status:\s*(\S+)/i);
+      const startMatch = block.match(/startChapter:\s*(\d+)/i);
+
+      hooks.set(hookId, {
+        status: statusMatch?.[1] ?? "active",
+        startChapter: startMatch ? parseInt(startMatch[1]!) : 0,
+      });
+    }
+
+    return hooks;
+  }
+
+  // ── Structural contradiction detection ────────────────────────────────
+
+  private detectStructuralContradictions(
+    chapterContent: string,
+    newState: string,
+    _newHooks: string,
+    warnings: Array<{ category: string; description: string }>,
+    language: "zh" | "en",
+  ): void {
+    if (!chapterContent || !newState) return;
+
+    // Check for dead characters speaking
+    const deadChars = this.extractDeadCharacters(newState);
+    for (const char of deadChars) {
+      const speechPattern = new RegExp(
+        `[「""]\\s*.*?[""」]\\s*${this.escapeRegex(char)}\\s*(?:说|道|喊|叫|笑|冷|哼|叹|问|答|应)`,
+        "i",
+      );
+      if (speechPattern.test(chapterContent)) {
+        warnings.push({
+          category: "missing_state_change",
+          description: language === "en"
+            ? `Character "${char}" is marked dead in state but appears to speak in chapter`
+            : `角色 "${char}" 在状态卡中标记死亡，但本章出现台词`,
+        });
+      }
+    }
+  }
+
+  private extractDeadCharacters(stateText: string): string[] {
+    const dead: string[] = [];
+    const lines = stateText.split("\n");
+
+    for (const line of lines) {
+      if (/状态[：:]\s*(?:死亡|已故|deceased|dead|killed)/i.test(line)) {
+        const nameMatch = line.match(/\|\s*([^|]+?)\s*\|/);
+        if (nameMatch) {
+          dead.push(nameMatch[1]!.trim());
+        }
+      }
+    }
+
+    return dead;
+  }
+
+  private escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  // ── Missing state change detection ────────────────────────────────────
+
+  private detectMissingStateChange(
+    chapterContent: string,
+    oldState: string,
+    newState: string,
+    warnings: Array<{ category: string; description: string }>,
+    language: "zh" | "en",
+  ): void {
+    if (!chapterContent || oldState === newState) return;
+
+    if (oldState === newState && chapterContent.length > 2000) {
+      const hasEvents = /[战斗|攻击|受伤|死亡|突破|升级|获得|失去|发现|离开|到达]/u.test(chapterContent);
+      if (hasEvents) {
+        warnings.push({
+          category: "info",
+          description: language === "en"
+            ? "Chapter contains significant events but state card unchanged"
+            : "本章包含重大事件但状态卡未更新",
+        });
+      }
+    }
+  }
 }

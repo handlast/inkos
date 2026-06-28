@@ -14,6 +14,7 @@ import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
 import { ReviserAgent, DEFAULT_REVISE_MODE, type ReviseMode } from "../agents/reviser.js";
+import { HumanizeAgent } from "../agents/humanize-agent.js";
 import { StateValidatorAgent, type ValidationResult, type ValidationWarning } from "../agents/state-validator.js";
 import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
@@ -52,6 +53,17 @@ import { persistChapterArtifacts } from "./chapter-persistence.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
+import { coachChapter } from "../agents/revision-coach.js";
+import { needsSummaryCompaction, compactChapterSummaries, archiveResolvedHooks } from "./truth-pruner.js";
+import { getPipelineHooks, HookEvents } from "./pipeline-hooks.js";
+// ponytail: remaining imports from these modules are available when needed:
+// - buildCoachPlannerHint, buildCoachWriterHint from "../agents/revision-coach.js"
+// - syncCurrentStateFactHistory, syncNarrativeMemoryIndex from "./memory-index.js"
+// - generateStyleGuide, buildDeterministicStyleGuide from "./style-guide.js"
+// - copyDirRecursive, copyDirShallow, extractCastNamesFromBody, markDownstreamChaptersStale,
+//   createResettlementBackup, copyResettledTruthArtifacts, prepareStagingBookForResettlement from "./resettlement.js"
+// - generateAndReviewFoundation, buildFoundationReviewFeedback, initBook, reviseFoundation,
+//   regeneratePhaseOutline, replacePhaseInOutline from "./foundation-ops.js"
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -64,6 +76,56 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
+}
+
+function isBlockingAuditSeverity(severity: string): boolean {
+  return severity === "critical" || severity === "error" || severity === "block";
+}
+
+function auditIssueKey(issue: AuditIssue): string {
+  return JSON.stringify([
+    issue.severity,
+    issue.category,
+    issue.description,
+    issue.suggestion,
+  ]);
+}
+
+function normalizeAuditIssues(issues: ReadonlyArray<AuditIssue>): AuditIssue[] {
+  const seen = new Set<string>();
+  const deduped: AuditIssue[] = [];
+  for (const issue of issues) {
+    const key = auditIssueKey(issue);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(issue);
+  }
+  return deduped;
+}
+
+function normalizeAuditSummary(summary: string, issues: ReadonlyArray<AuditIssue>): string {
+  const blocking = issues.filter((issue) => isBlockingAuditSeverity(issue.severity));
+  if (blocking.length === 0) return summary;
+  const zh = blocking.some((issue) =>
+    /[一-鿿]/.test([issue.category, issue.description, issue.suggestion].filter(Boolean).join(" ")),
+  );
+  const descriptions = blocking
+    .slice(0, 3)
+    .map((issue) => [issue.category, issue.description].filter(Boolean).join(": "))
+    .join(zh ? "；" : "; ");
+  return zh
+    ? `仍有 ${blocking.length} 个 critical 问题：${descriptions}`
+    : `Critical issues remain (${blocking.length}): ${descriptions}`;
+}
+
+function normalizeAuditResult(auditResult: AuditResult): AuditResult {
+  const issues = normalizeAuditIssues(auditResult.issues);
+  return {
+    ...auditResult,
+    issues,
+    passed: auditResult.passed && !issues.some((issue) => isBlockingAuditSeverity(issue.severity)),
+    summary: normalizeAuditSummary(auditResult.summary, issues),
+  };
 }
 
 interface ImportFoundationSourceOptions {
@@ -1031,6 +1093,9 @@ export class PipelineRunner {
         book.language ?? gp.language,
       );
 
+      const { readBookRules: readDraftBookRules } = await import("../agents/rules-reader.js");
+      const parsedBookRules = (await readDraftBookRules(bookDir))?.rules ?? null;
+
       const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
       this.logStage(stageLanguage, { zh: "撰写章节草稿", en: "writing chapter draft" });
       const output = await writer.writeChapter({
@@ -1047,6 +1112,34 @@ export class PipelineRunner {
         completionTokens: 0,
         totalTokens: 0,
       };
+
+      // ── Phase 1.7: Humanization pass (high-temp rewrite to reduce AIGC detectability) ──
+      const humanizeLang = book.language ?? gp.language;
+      const draftHumanizeIntensity = parsedBookRules?.antiAIGC?.humanize ?? 0.5;
+      if (draftHumanizeIntensity > 0 && output.content.length > 0) {
+        this.logStage(stageLanguage, { zh: "人味润色", en: "humanizing prose" });
+        const humanizer = new HumanizeAgent(this.agentCtxFor("humanizer", bookId));
+        const humanized = await humanizer.humanize(output.content, humanizeLang);
+        if (humanized.applied && humanized.content.length > 0) {
+          const humanizedCount = countChapterLength(humanized.content, lengthSpec.countingMode);
+          const drift = Math.abs(humanizedCount - writerCount) / writerCount;
+          if (drift <= 0.15) {
+            output.content = humanized.content;
+            output.wordCount = humanizedCount;
+            this.logInfo(stageLanguage, {
+              zh: `人味润色完成：${writerCount} → ${humanizedCount} 字`,
+              en: `Humanized: ${writerCount} → ${humanizedCount} words`,
+            });
+          } else {
+            this.logWarn(stageLanguage, {
+              zh: `人味润色字数偏差过大（${Math.round(drift * 100)}%），跳过`,
+              en: `Humanize drift too large (${Math.round(drift * 100)}%), skipping`,
+            });
+          }
+          totalUsage = PipelineRunner.addUsage(totalUsage, humanized.tokenUsage);
+        }
+      }
+
       const normalizedDraft = await this.normalizeDraftLengthIfNeeded({
         bookId,
         chapterNumber,
@@ -1094,6 +1187,57 @@ export class PipelineRunner {
       this.logStage(stageLanguage, { zh: "落盘草稿与真相文件", en: "persisting draft and truth files" });
       await writer.saveChapter(bookDir, draftOutput, gp.numericalSystem, resolvedLang);
       await writer.saveNewTruthFiles(bookDir, draftOutput, resolvedLang);
+
+      // ── Pipeline Hooks: post-persist (writeDraft path) ──
+      const draftHooks = getPipelineHooks();
+      await draftHooks.emit(HookEvents.POST_PERSIST, {
+        bookId, bookDir, chapterNumber, content: draftOutput.content,
+        title: draftOutput.title, language: resolvedLang, logger: this.config.logger,
+        storyDir: join(bookDir, "story"),
+      });
+
+      // ── Revision Coach: rule-based readability + completeness check ──
+      const coachResult = coachChapter(draftOutput.content, {
+        protagonistName: parsedBookRules?.protagonist?.name,
+      });
+      const storyDir = join(bookDir, "story");
+      const coachBlock = [
+        `# Revision Coach — Chapter ${chapterNumber}`,
+        "",
+        `## Readability: ${coachResult.readability.score}/100`,
+        ...coachResult.readability.issues.map((i: string) => `- ${i}`),
+        `avg_sentence_len=${coachResult.readability.metrics.avgSentenceLen} long_sentences=${coachResult.readability.metrics.longSentenceCount} short_streak=${coachResult.readability.metrics.shortStreakMax} ai_markers=${coachResult.readability.metrics.adjectiveRatio.toFixed(1)}/千字`,
+        "",
+        `## Completeness: ${coachResult.completeness.score}/100`,
+        ...coachResult.completeness.issues.map((i: string) => `- ${i}`),
+        `has_conflict=${coachResult.completeness.signals.hasConflict} has_goal=${coachResult.completeness.signals.hasGoal} has_hook=${coachResult.completeness.signals.hasHook} has_dialogue=${coachResult.completeness.signals.hasDialogue} has_action=${coachResult.completeness.signals.hasAction}`,
+      ].join("\n");
+      await writeFile(join(storyDir, "revision_coach.md"), coachBlock, "utf-8");
+      if (coachResult.readability.score < 80 || coachResult.completeness.score < 80) {
+        this.logStage(stageLanguage, {
+          zh: `自检：可读性 ${coachResult.readability.score}/100，完整性 ${coachResult.completeness.score}/100`,
+          en: `Coach: readability ${coachResult.readability.score}/100, completeness ${coachResult.completeness.score}/100`,
+        });
+      }
+
+      // ── Truth pruning: compact old summaries + archive resolved hooks ──
+      if (needsSummaryCompaction(chapterNumber)) {
+        const compactResult = await compactChapterSummaries(bookDir, chapterNumber);
+        if (compactResult.compacted) {
+          this.logStage(stageLanguage, {
+            zh: `摘要压缩：第${compactResult.blockStart}-${compactResult.blockEnd}章 ${compactResult.count} 条摘要已归档至 volume_summaries.md`,
+            en: `Summary compaction: chapters ${compactResult.blockStart}-${compactResult.blockEnd} (${compactResult.count} rows) archived to volume_summaries.md`,
+          });
+        }
+      }
+      const archiveResult = await archiveResolvedHooks(bookDir, chapterNumber);
+      if (archiveResult.archived > 0) {
+        this.logStage(stageLanguage, {
+          zh: `伏笔归档：${archiveResult.archived} 条已解决伏笔移出 pending_hooks.md`,
+          en: `Hook archiving: ${archiveResult.archived} resolved hooks moved out of pending_hooks.md`,
+        });
+      }
+
       await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, draftOutput);
       await this.syncNarrativeMemoryIndex(bookId);
 
@@ -1579,10 +1723,13 @@ export class PipelineRunner {
   // Full pipeline (convenience — runs draft + audit + revise in one shot)
   // ---------------------------------------------------------------------------
 
-  async writeNextChapter(bookId: string, wordCount?: number, temperatureOverride?: number): Promise<ChapterPipelineResult> {
+  async writeNextChapter(bookId: string, wordCount?: number, temperatureOverride?: number, auditFeedback?: string): Promise<ChapterPipelineResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
-      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, this.config.externalContext);
+      const effectiveContext = auditFeedback
+        ? `${this.config.externalContext ?? ""}\n\n## 审计反馈（重试时自动注入）\n上一次写作审计未通过，以下是审计发现的问题，请务必在本次写作中避免：\n\n${auditFeedback}\n`
+        : this.config.externalContext;
+      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, effectiveContext);
     } finally {
       await releaseLock();
     }
@@ -1664,6 +1811,33 @@ export class PipelineRunner {
 
     // Token usage accumulator
     let totalUsage: TokenUsageSummary = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+    // ── Phase 1.7: Humanization pass (high-temp rewrite to reduce AIGC detectability) ──
+    const humanizeIntensity = parsedBookRules?.antiAIGC?.humanize ?? 0.5;
+    if (humanizeIntensity > 0 && output.content.length > 0) {
+      this.logStage(stageLanguage, { zh: "人味润色", en: "humanizing prose" });
+      const humanizer = new HumanizeAgent(this.agentCtxFor("humanizer", bookId));
+      const humanized = await humanizer.humanize(output.content, pipelineLang);
+      if (humanized.applied && humanized.content.length > 0) {
+        const humanizedCount = countChapterLength(humanized.content, lengthSpec.countingMode);
+        const drift = Math.abs(humanizedCount - writerCount) / writerCount;
+        if (drift <= 0.15) {
+          output.content = humanized.content;
+          output.wordCount = humanizedCount;
+          this.logInfo(stageLanguage, {
+            zh: `人味润色完成：${writerCount} → ${humanizedCount} 字`,
+            en: `Humanized: ${writerCount} → ${humanizedCount} words`,
+          });
+        } else {
+          this.logWarn(stageLanguage, {
+            zh: `人味润色字数偏差过大（${Math.round(drift * 100)}%），跳过`,
+            en: `Humanize drift too large (${Math.round(drift * 100)}%), skipping`,
+          });
+        }
+        totalUsage = PipelineRunner.addUsage(totalUsage, humanized.tokenUsage);
+      }
+    }
+
     let finalContent: string;
     let finalWordCount: number;
     let revised: boolean;
@@ -1746,6 +1920,15 @@ export class PipelineRunner {
       normalizeApplied = reviewResult.normalizeApplied;
       preAuditNormalizedWordCount = reviewResult.preAuditNormalizedWordCount;
     }
+
+    // ── Pipeline Hooks: post-write ──
+    const hooks = getPipelineHooks();
+    await hooks.emit(HookEvents.POST_WRITE, {
+      bookId, bookDir, chapterNumber, content: finalContent,
+      title: output.title, revised, auditResult,
+      language: pipelineLang, logger: this.config.logger,
+      writeFile: (path: string, content: string) => writeFile(path, content, "utf-8"),
+    });
 
     // 3b. Lightweight per-chapter promotion pass — check if any hooks should
     // be promoted based on advanced_count derived from chapter_summaries.
@@ -1931,6 +2114,7 @@ export class PipelineRunner {
       }
     }
 
+    auditResult = normalizeAuditResult(auditResult);
     const resolvedStatus = chapterStatus ?? (auditResult.passed ? "ready-for-review" : "audit-failed");
     await persistChapterArtifacts({
       chapterNumber,
@@ -1964,6 +2148,14 @@ export class PipelineRunner {
         this.logStage(stageLanguage, { zh: "更新章节索引与快照", en: "updating chapter index and snapshots" }),
     });
 
+    // ── Pipeline Hooks: post-persist ──
+    await hooks.emit(HookEvents.POST_PERSIST, {
+      bookId, bookDir, chapterNumber, content: finalContent,
+      title: persistenceOutput.title, auditResult, resolvedStatus,
+      language: pipelineLang, logger: this.config.logger,
+      storyDir: join(bookDir, "story"),
+    });
+
     // 6. Send notification
     if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
       const statusEmoji = resolvedStatus === "state-degraded"
@@ -1986,6 +2178,14 @@ export class PipelineRunner {
           .join("\n"),
       });
     }
+
+    // ── Pipeline Hooks: post-chapter-complete ──
+    await hooks.emit(HookEvents.POST_CHAPTER_COMPLETE, {
+      bookId, bookDir, chapterNumber, content: finalContent,
+      title: persistenceOutput.title, wordCount: finalWordCount,
+      auditResult, revised, status: resolvedStatus,
+      language: pipelineLang, logger: this.config.logger,
+    });
 
     await this.emitWebhook("pipeline-complete", bookId, chapterNumber, {
       title: persistenceOutput.title,

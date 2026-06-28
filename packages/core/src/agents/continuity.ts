@@ -12,7 +12,9 @@ import {
   readVolumeMap,
   readCharacterContext,
   readCurrentStateWithFallback,
+  readStoryFrame,
 } from "../utils/outline-paths.js";
+import { readWarLedgers, composeWarResourceSummary } from "./planner-context.js";
 import { join } from "node:path";
 
 export interface AuditResult {
@@ -83,6 +85,7 @@ const DIMENSION_LABELS: Record<number, { readonly zh: string; readonly en: strin
   35: { zh: "世界规则遵守", en: "World Rule Compliance Check" },
   36: { zh: "关系动态", en: "Relationship Dynamics Check" },
   37: { zh: "正典事件一致性", en: "Canon Event Consistency Check" },
+  38: { zh: "读者清晰度", en: "Reader Clarity Check" },
 };
 
 function containsChinese(text: string): boolean {
@@ -181,8 +184,8 @@ function buildDimensionNote(
   // v10: Enhanced dimension notes with writing methodology awareness
   if (id === 7) {
     return language === "en"
-      ? "Check pacing rhythm: Do the recent 3-5 chapters form a complete mini-goal cycle (build-up → escalation → climax → aftermath)? If 5+ consecutive chapters pass without a climax (payoff/reward/reversal), flag as pacing stagnation. If the previous chapter was a climax/big reversal, does this chapter show change (relationships shifted, status changed, costs paid)? If it jumps straight to new build-up without showing impact, flag as 'post-climax impact missing'. Daily/transition scenes must carry at least one task: plant a hook, advance a relationship, set up contrast, or prepare the next cycle."
-      : "检查节奏波形：最近 3-5 章是否形成了完整的「蓄压→升级→爆发→后效」周期？如果连续 5 章没有爆发（兑现/回报/翻转），标记为节奏停滞。如果上一章是爆发/高潮/大反转，本章是否写出了改变？如果直接跳到新蓄压而没有展示前一波爆发的影响，标记为「高潮后影响缺失」。非冲突章节中的日常/过渡/对话段落，是否至少承担了一项任务：埋伏笔、推关系、建立反差、准备下一轮蓄压。纯水日常标记为流水账风险。";
+      ? "Check pacing rhythm: Do the recent 3-5 chapters form a complete mini-goal cycle (build-up → escalation → climax → aftermath)? If 5+ consecutive chapters pass without a climax (payoff/reward/reversal), flag as pacing stagnation. If the previous chapter was a climax/big reversal, does this chapter show change (relationships shifted, status changed, costs paid)? If it jumps straight to new build-up without showing impact, flag as 'post-climax impact missing'. Daily/transition scenes must carry at least one task: plant a hook, advance a relationship, set up contrast, or prepare the next cycle. Also check whether non-critical chase/combat/movement/procedure/transaction/deduction passages take too much space without changing information, resources, injury, position, relationships, power, or hook state; ask for compression when they do."
+      : "检查节奏波形：最近 3-5 章是否形成了完整的「蓄压→升级→爆发→后效」周期？如果连续 5 章没有爆发（兑现/回报/翻转），标记为节奏停滞。如果上一章是爆发/高潮/大反转，本章是否写出了改变？如果直接跳到新蓄压而没有展示前一波爆发的影响，标记为「高潮后影响缺失」。非冲突章节中的日常/过渡/对话段落，是否至少承担了一项任务：埋伏笔、推关系、建立反差、准备下一轮蓄压。纯水日常标记为流水账风险。同时检查非关键追逐/打斗/移动/程序/交易/推理是否占用过多篇幅却没有改变信息、资源、伤势、位置、关系、权力或伏笔状态；若是，要求压缩。";
   }
 
   if (id === 15) {
@@ -216,7 +219,24 @@ function buildDimensionNote(
 • At volume end (final chapter of any volume per volume_map) a promoted core_hook that is still open or stale without explicit "carried over to volume N+1" planning → critical.
 • Any non-promoted stale hook → info-level log; do not fail the chapter on it, but note it so the planner can schedule cleanup.
 
-Quote the exact hook_id in description and include the stale / blocked marker text verbatim. Structure check only — do not judge hook prose quality.`
+Quote the exact hook_id in description and include the stale / blocked marker text verbatim. Structure check only — do not judge hook prose quality.
+
+## Hook Payoff Validation Rules (Three-Element Test)
+
+When checking whether a hook from the chapter_memo's advance/resolve section has been delivered, use the THREE-ELEMENT TEST instead of word count:
+
+A hook payoff scene is VALID if it contains at least 2 of these 3 elements:
+1. **Specific object/information name** — not pronouns like "that thing" or "it"
+2. **Observable character action** — touch/pick up/see/say/hear, NOT "remember" or "think about"
+3. **At least one consequence** — decision change, relationship shift, new info revealed, physical state change
+
+Hook type-specific guidance:
+- **Status change hooks** (pain/injury/ability): Physical reactions (grimacing, trembling, losing grip) with sensory details count as valid payoff. "He felt something wrong" is NOT valid. "He clutched his chest, cold sweat beading on his forehead" IS valid.
+- **Object hooks** (keys/letters/artifacts): Direct physical interaction with the object counts. "He remembered the letter was in the drawer" is NOT valid. "He pulled open the drawer, the letter still at the bottom, edges chewed by insects" IS valid.
+- **Information hooks** (secrets/clues/truths): Character receiving the info with an observable reaction counts. "He sensed something was off" is NOT valid. "He stared at the serial number, fingers frozen on the keyboard — N-44, the one C-77 mentioned" IS valid.
+- **Relationship hooks** (alliance/betrayal/trust): Actions that demonstrate the relationship change count. "Their relationship grew closer" is NOT valid. "She broke the last ration in half and handed one piece to him. He took it without a word" IS valid.
+
+Do NOT flag a hook as undelivered just because the payoff scene is short (under 60 chars). A concise, punchy payoff that passes the three-element test is valid.`
         : `Phase 7 hook-debt 升级规则（含 hotfix 2/3）。阅读 pending_hooks.md 伏笔池时不要只看"有没有悬而未决的伏笔"，要读状态列中的 stale / blocked 标记、core_hook 列、depends_on 列、以及升级列：
 
 • critical 级别仅适用于升级=是（promoted=true）的伏笔。非升级的 stale/blocked 伏笔一律保持 info——升级标志是降噪的开关，因为架构师阶段会产出大量非承重的伏笔种子。
@@ -225,7 +245,24 @@ Quote the exact hook_id in description and include the stale / blocked marker te
 • 卷尾（volume_map 中任一卷的末章）仍有升级=是的主线伏笔处于 open 或 stale 且没有显式"延至下一卷"规划 → critical。
 • 升级=否的 stale 伏笔 → info 级记录，不判本章失败，但保留以便 planner 安排清理。
 
-description 中要明确引用 hook_id，并把状态列中 stale / blocked 的原文标记字面抄进去。本维度只审结构，不评价伏笔文笔。`;
+description 中要明确引用 hook_id，并把状态列中 stale / blocked 的原文标记字面抄进去。本维度只审结构，不评价伏笔文笔。
+
+## Hook 兑现判定规则（三要素测试）
+
+检查 chapter_memo 的 advance/resolve 中的 hook 是否兑现时，使用**三要素测试**而非字数判断：
+
+兑现段必须包含以下三要素中的至少两个才算有效：
+1. **具体物件/信息名称**——不是代词"那个东西""它"
+2. **角色可观察动作**——触摸/拿起/看到/说出/听到，不是"想起"或"觉得"
+3. **至少一个后果**——决策改变、关系变化、新信息揭露、身体状态变化
+
+按 hook 类型判定：
+- **状态变化类**（疼痛/伤势/能力）：身体反应描写（皱眉、颤抖、失手掉落）即为有效兑现。"他感觉身体有些不对"不算有效。"他按住左胸，额角渗出冷汗"算有效。
+- **物件类**（钥匙/信件/令牌）：角色与物件的直接物理交互即为有效。"他想起那张借条还在抽屉里"不算有效。"他拉开抽屉，借条还在最底层，边角被虫蛀了几个洞"算有效。
+- **信息类**（秘密/线索/真相）：角色接收到信息并有可观察反应即为有效。"他隐约觉得事情没那么简单"不算有效。"他盯着屏幕上的编号，手指停在键盘上没动——N-44，C-77 提过的那个"算有效。
+- **关系类**（结盟/背叛/信任）：角色间的具体互动体现关系变化即为有效。"两人的关系更近了一步"不算有效。"她把最后一块干粮掰成两半，递了一半给他。他接过去没说话"算有效。
+
+不要因为兑现段落较短（低于60字）就判定为未兑现。简洁有力的兑现场景如果通过三要素测试，就是有效兑现。`;
     case 19:
       return language === "en"
         ? "Check whether POV shifts are signaled clearly and stay consistent with the configured viewpoint."
@@ -260,12 +297,16 @@ description 中要明确引用 hook_id，并把状态列中 stale / blocked 的�
         : "检查番外是否越权回收正传伏笔（warning级别）";
     case 32:
       return language === "en"
-        ? "Check whether the ending renews curiosity, whether promised payoffs are landing on the cadence their hooks imply, whether pressure gets any release, and whether reader expectation gaps are accumulating faster than they are being satisfied. If a climax just occurred, check whether the aftermath chapters show concrete change before starting a new cycle."
-        : "检查：章尾是否重新点燃好奇心，已经承诺的回收是否按伏笔自身节奏落地，压力是否得到释放，读者期待缺口是在持续累积还是在被满足。如果刚经历高潮，检查后效章节是否在开启新周期前展示了具体改变。";
+        ? "Check whether the ending renews curiosity, whether promised payoffs are landing on the cadence their hooks imply, whether pressure gets any release, and whether reader expectation gaps are accumulating faster than they are being satisfied. If a climax just occurred, check whether the aftermath chapters show concrete change before starting a new cycle. If the recent run has 2+ chapters of fleeing, hiding, being judged, being surrounded, passive pressure, or rule-crushing with the protagonist only reacting, check whether this chapter gives a visible counter-move, gain, or situation change. Around chapters 8-10, no counterattack/payoff after a long pressure run should escalate to high warning or critical unless the outline/memo explicitly schedules an immediate payoff."
+        : "检查：章尾是否重新点燃好奇心，已经承诺的回收是否按伏笔自身节奏落地，压力是否得到释放，读者期待缺口是在持续累积还是在被满足。如果刚经历高潮，检查后效章节是否在开启新周期前展示了具体改变。如果近期连续 2 章以上都是逃、躲、被审、被围、被动承压或被敌方/规则推着走，检查本章是否给主角可见反制、收益或局势改变。第 8-10 章前后若长期承压仍无反击/payoff，且卷纲或 memo 没有明确下一章立即兑现，应升级为强 warning 或 critical。";
     case 33:
       return language === "en"
-        ? "Cross-check the chapter_memo provided with the chapter. Does the final prose deliver the memo's goal and leave a visible trace for every one of the 7 sections it contains (tasks, pay-offs / held-back cards, daily/transition function map, three-question check, end-of-chapter concrete changes, hard-don'ts)? Missing or contradicted sections -> critical. Note: a sparse memo (breather chapter, goal + skeleton body only) is legitimate — only flag drift against sections that the memo actually populates. Never flag the memo itself for being sparse."
-        : "对照随章提供的 chapter_memo。成稿是否兑现了 memo 中的 goal，并在 7 段正文（当前任务 / 该兑现·暂不掀 / 日常过渡功能 / 关键抉择三连问 / 章尾必须发生的改变 / 不要做 等）中留下可见落地痕迹？任何段落缺失或被写反 → critical。提醒：稀疏 memo 合法（喘息章 memo 可以只有 goal + 骨架 body），只检查 memo 实际写出的段落，不能因为 memo 稀疏就判 incomplete。";
+        ? "Cross-check the chapter_memo provided with the chapter. Does the final prose deliver the memo's goal and leave a visible trace for every one of the sections it contains (tasks, pay-offs / held-back cards, daily/transition function map, three-question check, end-of-chapter concrete changes, hard-don'ts, and Active Cast when present)? If Active Cast is present, check that offstage characters do not act, mentioned characters are only referenced, silent characters do not receive direct quoted speech, channel_only characters appear only through channel/remote text, and no_direct_line characters have no direct dialogue. Missing or contradicted sections -> critical only when the memo made them hard requirements; otherwise warning. Note: a sparse memo is legitimate — only flag drift against sections that the memo actually populates. Never flag the memo itself for being sparse."
+        : "对照随章提供的 chapter_memo。成稿是否兑现了 memo 中的 goal，并在 memo 实际写出的段落（当前任务 / 读者清晰度底线 / 该兑现·暂不掀 / 日常过渡功能 / 关键抉择三连问 / 章尾必须发生的改变 / 不要做 / 本章出场人物 等）中留下可见落地痕迹？如果存在"本章出场人物"，检查 offstage 是否实体行动、mentioned 是否只被提及、silent 是否直接说话、channel_only 是否越界实体互动、no_direct_line 是否有直接台词。memo 明确写成硬要求却缺失或写反 → critical；其他偏离先标 warning。提醒：稀疏 memo 合法，只检查 memo 实际写出的段落，不能因为 memo 稀疏就判 incomplete。";
+    case 38:
+      return language === "en"
+        ? "Reader clarity is structural, not prose polish. Check whether each core scene makes the front-stage situation legible: who is present, where they are, what is physically happening, what the protagonist visibly wants now, what obstacle blocks them, and what immediate cost failure carries. Mystery may hide deeper truth, hidden identity, long-term cause, or later reversal; it must not hide the current scene, visible intent, action object, or immediate stakes. Also check whether key on-stage information is over-compressed into metaphor, riddle-like lines, report fragments, or ellipsis. Flag concept overload when opening/new-setting chapters throw multiple unfamiliar proper nouns, institutions, powers, rules, or objects into the foreground without reader handles (visible shape / owner or user / current function / immediate consequence). Flag action-logic gaps when escape, chase, combat, terrain, procedure, transaction, or deduction beats lack a short causal bridge, so readers cannot tell why the move is possible, dangerous, or necessary. Flag opaque dialogue when important lines are only subtext/jargon and the reader cannot tell whether they threaten, probe, refuse, trade, conceal, pressure, ask for help, or change the relationship. If readers must translate an atmospheric sentence into a concrete fact before they can follow the action logic, flag warning; use critical when it blocks the chapter task. Do not demand lore dumps."
+        : "读者清晰度属于结构完成度，不属于普通文笔润色。检查每个核心场景是否让读者看懂前台局面：谁在场、在哪里、正在发生什么、主角此刻可见目标是什么、阻力来自谁/什么、失败马上付出什么代价。悬念可以隐藏深层真相、幕后身份、长期原因或后续反转；不得隐藏当前场景、当下意图、行动对象和即时风险。同时检查关键现场信息是否被过度压缩成比喻、谜语句、报告碎片或省略句。早期章节或新设定密集章若连续抛出多个陌生专名、制度、能力、规则或道具，却没有读者抓手（可见形态 / 属于谁或谁在用 / 当前功能 / 眼前后果），标记为术语/设定负载失败。逃生、追逐、战斗、地形、程序、交易或推理缺少短因果桥，导致读者不知道为什么可行、为什么危险、为什么必须这样做，标记为动作逻辑缺口。重要台词如果只有潜台词或行话，读者无法判断它是在威胁、试探、拒绝、交易、隐瞒、压迫、求救还是改变关系，标记为台词落点不清。如果读者必须先把氛围句翻译成具体事实才能理解行动逻辑，标 warning；影响本章任务理解 → critical。不得要求设定说明书式补充。";
     case 34:
     case 35:
     case 36:
@@ -332,6 +373,7 @@ function buildDimensionList(
   // Always-active dimensions
   activeIds.add(32); // 读者期待管理 — universal
   activeIds.add(33); // 章节备忘偏离 — universal (replaces legacy volume-outline drift)
+  activeIds.add(38); // 读者清晰度 — universal
 
   // Conditional overrides
   if (gp.eraResearch || bookRules?.eraConstraints?.enabled) {
@@ -395,7 +437,7 @@ export class ContinuityAuditor extends BaseAgent {
       };
     },
   ): Promise<AuditResult> {
-    const [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline] =
+    const [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline, glossaryRaw] =
       await Promise.all([
         // Phase 5 consolidation: derive initial state from roles + seed hooks
         // when current_state.md is still the architect seed placeholder.
@@ -410,7 +452,38 @@ export class ContinuityAuditor extends BaseAgent {
         this.readFileSafe(join(bookDir, "story/parent_canon.md")),
         this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
         readVolumeMap(bookDir, "(文件不存在)"),
+        this.readFileSafe(join(bookDir, "story/state/glossary.json")),
       ]);
+    // Cross-validation truth files: worldbuilding, character assets, war ledgers, etc.
+    const [storyBible, characterAssets, allianceState, relationshipGraph, eraMood, warLedgers, phaseOutlineRaw] = await Promise.all([
+      readStoryFrame(bookDir, "(文件不存在)"),
+      this.readFileSafe(join(bookDir, "story/character_assets.md")),
+      this.readFileSafe(join(bookDir, "story/alliance_state.md")),
+      this.readFileSafe(join(bookDir, "story/relationship_graph.md")),
+      this.readFileSafe(join(bookDir, "story/era_mood.md")),
+      readWarLedgers(join(bookDir, "story")),
+      this.readFileSafe(join(bookDir, "outline/phase_outline.md")),
+    ]);
+    // Parse registered glossary projection (jargon decode audit). Absent or
+    // malformed file degrades to an empty term list — never throws.
+    let glossaryTerms: ReadonlyArray<{ readonly term: string; readonly firstSeenChapter?: number; readonly lastDecodedAtChapter?: number }> = [];
+    try {
+      if (glossaryRaw !== "(文件不存在)") {
+        const parsedGlossary: unknown = JSON.parse(glossaryRaw);
+        if (
+          typeof parsedGlossary === "object" && parsedGlossary !== null &&
+          "terms" in parsedGlossary && Array.isArray((parsedGlossary as Record<string, unknown>).terms)
+        ) {
+          const rawTerms = (parsedGlossary as Record<string, unknown>).terms as unknown[];
+          glossaryTerms = rawTerms.filter(
+            (t): t is { readonly term: string; readonly firstSeenChapter?: number; readonly lastDecodedAtChapter?: number } =>
+              typeof t === "object" && t !== null && "term" in t && typeof (t as Record<string, unknown>).term === "string" && ((t as Record<string, unknown>).term as string).trim().length > 0,
+          );
+        }
+      }
+    } catch {
+      glossaryTerms = [];
+    }
     const currentState = options?.truthFileOverrides?.currentState ?? diskCurrentState;
     const ledger = options?.truthFileOverrides?.ledger ?? diskLedger;
     const hooks = options?.truthFileOverrides?.hooks ?? diskHooks;
@@ -461,12 +534,33 @@ export class ContinuityAuditor extends BaseAgent {
         : "\n\n你有联网搜索能力（search_web / fetch_url）。对于涉及真实年代、人物、事件、地理、政策的内容，你必须用search_web核实，不可凭记忆判断。至少对比2个来源交叉验证。"
       : "";
 
+    // Jargon-decode audit: feed the registered glossary into the prompt so
+    // the reviewer (LLM, not JS NLP) flags any registered term that appears
+    // in the chapter without a reader-facing decode.
+    const glossaryListZh = glossaryTerms
+      .map((t) => `- ${t.term}（首次出现第${t.firstSeenChapter ?? "?"}章，最近解码第${t.lastDecodedAtChapter ?? "无"}章）`)
+      .join("\n");
+    const glossaryListEn = glossaryTerms
+      .map((t) => `- ${t.term} (first seen ch.${t.firstSeenChapter ?? "?"}, last decoded ch.${t.lastDecodedAtChapter ?? "none"})`)
+      .join("\n");
+    const glossaryAuditBlock = glossaryTerms.length === 0
+      ? ""
+      : isEnglish
+        ? `\n\n## Registered Glossary (jargon-decode audit)
+Below is the registered list of domain jargon / proper nouns and when each was last decoded for the reader:
+${glossaryListEn}
+If any of these terms appears in the chapter under review WITHOUT any reader-facing decode (the POV character living it, dialogue, inner monologue, sensory grounding, or self-evident context — ideally surfaced through the POV character's senses or speech rather than omniscient narration), you MUST emit an issue with severity at least "warning", category exactly "Reader Clarity", whose description names the specific term and labels it "jargon used without a decode line for the reader", and whose suggestion points to a lightweight one-line decode or recall to add. If a term debuts here and is piled on with no decode at all, lean toward warning/critical. Do NOT re-flag a term that was already decoded earlier — but if it was last decoded long ago and is used heavily this chapter, you may suggest a one-line recall. If the glossary is empty or none of the registered terms appear in this chapter, do NOT fabricate such an issue.`
+        : `\n\n## 已登记术语表（黑话未解码审查）
+下面是已登记的专有名词/术语表，以及每个术语最近一次面向读者解码的章节：
+${glossaryListZh}
+给定上面这份"已登记专有名词/术语表"。如果本章正文出现了其中的术语，却没有任何面向读者的解码（角色亲历/对话/内心独白/感官落地/上下文自明——且解码最好经由 POV 角色的感官或言语带出，而非全知旁白直接解释），就必须报一条 severity 至少为 warning 的【读者清晰度】issue，category 写"读者清晰度"，description 里点名是哪个术语、属于"黑话出场无解码线"，suggestion 给出补一句轻量解码/回想的方向。若术语首次出现就堆砌且无解码，更应判 warning/critical。不要因为术语已在前文解码过就重复报（但如果距上次解码很久、本章重度使用，可提示补一句回想）。如果术语表为空或本章未出现任何登记术语，不要捏造此类 issue。`;
+
     const systemPrompt = isEnglish
       ? `You are a strict ${genreLabel} web-fiction structural editor. Audit the chapter for completion and structure, not for prose craft. ALL OUTPUT MUST BE IN ENGLISH.${protagonistBlock}${searchNote}
 
 ## Reviewer Scope (hard constraints)
 
-You audit completion and structure only. Your job is to decide whether the chapter delivers the plan, keeps characters and timelines intact, and moves the book forward. Wording, sentence rhythm, paragraph shape, punctuation, imagery, and other prose-surface choices are NOT yours — those belong to the Polisher pass that runs after you. If you notice prose-surface issues, you may flag them with severity "info" so the Polisher can see them, but they do not count toward passed / overall_score and they must never be critical.
+You audit completion and structure only. Your job is to decide whether the chapter delivers the plan, keeps characters and timelines intact, and moves the book forward. Wording, sentence rhythm, paragraph shape, punctuation, imagery, and other prose-surface choices are NOT yours — those belong to the Polisher pass that runs after you. If you notice prose-surface issues, you may flag them with severity "info" so the Polisher can see them, but they do not count toward passed / overall_score and they must never be critical. **Reader clarity is the exception because it is structural**: if the current scene, visible character intent, action object, or immediate stakes are unreadable, score it under Reader Clarity / structural completion, not prose polish.
 
 You audit twelve structural reader-pain patterns: dragging / flat openings, blurry worldbuilding disconnected from reality, contradictory character setup, tangled POV, mainline drift or stagnation, weak conflict with missing payoff, pacing loss of control and abrupt transitions, character inconsistency across the arc, thin/one-note characters without contrast, stiff emotion expression and abrupt relationship jumps, imbalanced cheats/power gifts, and settings that never land in concrete action. Alongside these, keep the engineering dimensions listed below (OOC, timeline coherence, information boundary, hook debt, cross-chapter repetition, lexical fatigue, length band, title fatigue, paragraph shape).
 
@@ -474,10 +568,23 @@ Sparse chapter_memo is legitimate. Breather / aftermath / transition chapters ma
 
 If the chapter memo, rule stack, or supplied context specifies content proportions between lines (politics/romance, career/relationship, case/character, etc.), audit whether those lines appear as actual scenes, dialogue, action, or relationship movement. A line that is only summarized in one sentence counts as missing. Mark it critical only when the memo explicitly required it for this chapter.
 
-For every issue, set repair_scope as a typed routing hint: "local" for wording, paragraph shape, small repetition, or narrow sentence-level fixes; "structural" for plot drift, timeline break, missing scene/payoff, character logic collapse, POV/knowledge boundary failure, or anything requiring a rewritten scene/chapter; "unknown" only when you genuinely cannot decide.
+If the chapter memo includes Active Cast, audit character usage against it. Characters marked offstage must not appear as direct actors; mentioned characters may only be referenced; silent characters must not receive direct quoted speech; channel_only characters may only appear through channel / remote text; no_direct_line characters must not have direct dialogue. Treat clear violations as warning by default, critical only when the memo explicitly made the permission a hard prohibition or the violation changes plot outcome.
 
 Audit dimensions:
 ${dimList}
+
+## Cross-Validation Rules
+The following data has been injected into context. You MUST cross-check the chapter against them:
+- Worldbuilding (story_frame): world rules, power systems, faction relations in the chapter must not contradict the worldbuilding prose
+- Character Assets: equipment/items/resources mentioned must match the asset ledger
+- Alliance State: faction relationship changes must match the alliance state
+- Relationship Graph: character relationships must match; relationship shifts need foreshadowing
+- Era Mood: scene atmosphere must align with era mood baseline
+- War Resource Overview: war-related numbers (forces, territory, resources) must match ledgers
+- Phase Outline: this chapter must advance the current phase's goals
+Flag contradictions by severity (factual contradiction = warning/critical, minor drift = info). If a truth file is absent (placeholder), skip its cross-validation — do NOT fabricate issues.
+
+For every issue, set repair_scope as a typed routing hint: "local" for wording, paragraph shape, small repetition, or narrow sentence-level fixes; "structural" for plot drift, timeline break, missing scene/payoff, character logic collapse, POV/knowledge boundary failure, or anything requiring a rewritten scene/chapter; "unknown" only when you genuinely cannot decide.
 
 Output format MUST be JSON:
 {
@@ -503,12 +610,12 @@ overall_score calibration:
 - 75-84: Noticeable problems but the story backbone holds, needs revision but not urgent
 - 65-74: Multiple issues hurt the reading experience, pacing or continuity has gaps
 - < 65: Structural breakdown, needs major rewrite
-Score holistically — do not let a single minor issue tank the score.`
+Score holistically — do not let a single minor issue tank the score.${glossaryAuditBlock}`
       : `你是一位严格的${gp.name}网络小说结构审稿编辑。你只审完成度 + 结构，不审文笔。${protagonistBlock}${searchNote}
 
 ## 审稿边界（硬约束）
 
-你不审文笔、不审排版、不审句式——这些归 Polisher。你发现的文笔问题只能以 severity="info" 标注供 Polisher 参考，不计入 reviewer 的 passed/overall_score，也绝不可标为 critical。
+你不审文笔、不审排版、不审句式——这些归 Polisher。你发现的文笔问题只能以 severity="info" 标注供 Polisher 参考，不计入 reviewer 的 passed/overall_score，也绝不可标为 critical。**读者清晰度例外，因为它属于结构完成度**：如果当前场景、人物可见意图、行动对象或即时风险读不懂，应按读者清晰度/结构完成度处理，不得降格成普通文笔建议。
 
 你审 12 条结构类雷点：开篇拖沓/平淡、世界观模糊脱现实、人设矛盾、视角杂乱、主线偏离/停滞、冲突乏力爽点缺失、节奏失控过渡生硬、人设前后矛盾、人物单薄无反差、情感表达生硬/关系突兀、金手指失衡、设定无落地。同时保留工程维度（OOC、timeline 一致、信息越界、hook-debt、跨章重复、词汇疲劳、章节字数、标题疲劳、段落形状）。
 
@@ -516,10 +623,23 @@ Score holistically — do not let a single minor issue tank the score.`
 
 如果章节备忘、规则栈或输入上下文明确指定多条剧情线的比例（权谋/感情、事业/恋爱、案件/人物等），要审它们是否真正落成了场景、对话、行动或关系变化。只用一句总结带过的线，视为缺失。只有当 memo 明确要求本章必须推进该线时，才标 critical。
 
-每条 issue 必须给 repair_scope 作为 typed 路由提示："local" 表示措辞、段落形状、小重复、句段级小修；"structural" 表示主线偏离、时间线断裂、场面/回报缺失、人物逻辑崩、视角/信息边界失败，或任何需要重写场景/整章的问题；只有确实无法判断时才写 "unknown"。
+如果章节备忘包含"本章出场人物"，必须审查正文是否遵守 active cast：offstage 不得作为实体行动者出现；mentioned 只能被提及；silent 不得有直接引号台词；channel_only 只能通过频道/远端文本出现；no_direct_line 不得有直接台词。默认标 warning；只有当 memo 明确写成硬禁令，或违规改变剧情结果时，才标 critical。
 
 审查维度：
 ${dimList}
+
+## 交叉验证规则
+以下数据已注入上下文，你必须将正文与它们交叉验证：
+- 世界观设定（story_frame）：正文中的世界规则、能力体系、阵营关系不得与之矛盾
+- 角色资产：正文提及的装备/道具/资源必须与角色资产账本一致
+- 联盟状态：阵营关系变化必须与联盟状态一致
+- 关系图谱：角色间的关系描述必须与关系图一致，关系变调必须有铺垫
+- 时代情绪：场景氛围必须与时代情绪基调吻合
+- 战争资源总览：战争相关数字（兵力、领土、资源）必须与账本一致
+- 阶段纲：本章必须推进当前阶段的目标
+发现矛盾时，按 severity 标注（事实性矛盾=warning/critical，轻微偏差=info）。如果某个 truth 文件不存在（占位符），跳过该项交叉验证——不要捏造 issue。
+
+每条 issue 必须给 repair_scope 作为 typed 路由提示："local" 表示措辞、段落形状、小重复、句段级小修；"structural" 表示主线偏离、时间线断裂、场面/回报缺失、人物逻辑崩、视角/信息边界失败，或任何需要重写场景/整章的问题；只有确实无法判断时才写 "unknown"。
 
 输出格式必须为 JSON：
 {
@@ -545,7 +665,7 @@ overall_score 评分校准：
 - 75-84：有明显问题但故事主干完整，需要修但不紧急
 - 65-74：多处影响阅读体验的问题，节奏或连续性有断裂
 - < 65：结构性问题，需要大幅重写
-综合评分，不要因为单一小问题大幅拉低分数。`;
+综合评分，不要因为单一小问题大幅拉低分数。${glossaryAuditBlock}`;
 
     const ledgerBlock = gp.numericalSystem
       ? isEnglish
@@ -626,13 +746,51 @@ overall_score 评分校准：
         : `\n## 上一章全文（用于衔接检查）\n${previousChapter}\n`
       : "";
 
+    // Cross-validation blocks: worldbuilding, assets, alliances, relationships, era, war, phase
+    const bibleBlock = storyBible !== "(文件不存在)"
+      ? isEnglish
+        ? `\n## Worldbuilding (Story Frame)\n${storyBible}\n`
+        : `\n## 世界观设定\n${storyBible}\n`
+      : "";
+    const assetsBlock = characterAssets !== "(文件不存在)"
+      ? isEnglish
+        ? `\n## Character Assets\n${characterAssets}\n`
+        : `\n## 角色资产\n${characterAssets}\n`
+      : "";
+    const allianceBlock = allianceState !== "(文件不存在)"
+      ? isEnglish
+        ? `\n## Alliance State\n${allianceState}\n`
+        : `\n## 联盟状态\n${allianceState}\n`
+      : "";
+    const relationshipBlock = relationshipGraph !== "(文件不存在)"
+      ? isEnglish
+        ? `\n## Relationship Graph\n${relationshipGraph}\n`
+        : `\n## 关系图谱\n${relationshipGraph}\n`
+      : "";
+    const eraMoodBlock = eraMood !== "(文件不存在)"
+      ? isEnglish
+        ? `\n## Era Mood\n${eraMood}\n`
+        : `\n## 时代情绪\n${eraMood}\n`
+      : "";
+    const warResourceSummary = composeWarResourceSummary(warLedgers, resolvedLanguage);
+    const warLedgerBlock = warResourceSummary.trim().length > 0
+      ? isEnglish
+        ? `\n## War Resource Overview\n${warResourceSummary}\n`
+        : `\n## 战争资源总览\n${warResourceSummary}\n`
+      : "";
+    const phaseBlock = phaseOutlineRaw !== "(文件不存在)"
+      ? isEnglish
+        ? `\n## Phase Outline\n${phaseOutlineRaw}\n`
+        : `\n## 阶段纲\n${phaseOutlineRaw}\n`
+      : "";
+
     const userPrompt = isEnglish
       ? `Review chapter ${chapterNumber}.
 
 ## Current State Card
 ${currentState}
 ${ledgerBlock}
-${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock}${memoBlock}${prevChapterBlock}${styleGuideBlock}
+${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${bibleBlock}${assetsBlock}${allianceBlock}${relationshipBlock}${eraMoodBlock}${warLedgerBlock}${phaseBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock}${memoBlock}${prevChapterBlock}${styleGuideBlock}
 
 ## Chapter Content Under Review
 ${chapterContent}`
@@ -641,7 +799,7 @@ ${chapterContent}`
 ## 当前状态卡
 ${currentState}
 ${ledgerBlock}
-${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock}${memoBlock}${prevChapterBlock}${styleGuideBlock}
+${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${bibleBlock}${assetsBlock}${allianceBlock}${relationshipBlock}${eraMoodBlock}${warLedgerBlock}${phaseBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock}${memoBlock}${prevChapterBlock}${styleGuideBlock}
 
 ## 待审章节内容
 ${chapterContent}`;

@@ -8,6 +8,8 @@ import {
 } from "../models/runtime-state.js";
 import { MemoryDB, type Fact, type StoredHook, type StoredSummary } from "../state/memory-db.js";
 import { bootstrapStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
+import { loadRuntimeStateSnapshotAsOf } from "../state/runtime-state-store.js";
+import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import {
   filterActiveHooks,
   isFuturePlannedHook,
@@ -56,6 +58,8 @@ export interface VolumeSummarySelection {
 export async function retrieveMemorySelection(params: {
   readonly bookDir: string;
   readonly chapterNumber: number;
+  readonly asOfChapter?: number;
+  readonly asOfSnapshot?: RuntimeStateSnapshot;
   readonly goal: string;
   readonly outlineNode?: string;
   readonly mustKeep?: ReadonlyArray<string>;
@@ -63,31 +67,8 @@ export async function retrieveMemorySelection(params: {
   const storyDir = join(params.bookDir, "story");
   const stateDir = join(storyDir, "state");
   const fallbackChapter = Math.max(0, params.chapterNumber - 1);
+  const asOfChapter = params.asOfChapter ?? params.asOfSnapshot?.manifest?.lastAppliedChapter;
 
-  await bootstrapStructuredStateFromMarkdown({
-    bookDir: params.bookDir,
-    fallbackChapter,
-  }).catch(() => undefined);
-
-  const [
-    currentStateMarkdown,
-    hooksMarkdown,
-    volumeSummariesMarkdown,
-    structuredCurrentState,
-    structuredHooks,
-    structuredSummaries,
-  ] = await Promise.all([
-    readCurrentStateWithFallback(params.bookDir),
-    readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
-    readFile(join(storyDir, "volume_summaries.md"), "utf-8").catch(() => ""),
-    readStructuredState(join(stateDir, "current_state.json"), CurrentStateStateSchema),
-    readStructuredState(join(stateDir, "hooks.json"), HooksStateSchema),
-    readStructuredState(join(stateDir, "chapter_summaries.json"), ChapterSummariesStateSchema),
-  ]);
-  const facts = structuredCurrentState?.facts ?? parseCurrentStateFacts(
-    currentStateMarkdown,
-    fallbackChapter,
-  );
   const narrativeQueryTerms = extractQueryTerms(
     params.goal,
     params.outlineNode,
@@ -98,9 +79,48 @@ export async function retrieveMemorySelection(params: {
     params.outlineNode,
     params.mustKeep ?? [],
   );
+  const volumeSummariesMarkdown = await readFile(join(storyDir, "volume_summaries.md"), "utf-8").catch(() => "");
   const volumeSummaries = selectRelevantVolumeSummaries(
     parseVolumeSummariesMarkdown(volumeSummariesMarkdown),
     narrativeQueryTerms,
+  );
+
+  if (typeof asOfChapter === "number") {
+    const snapshot = params.asOfSnapshot ?? await loadRuntimeStateSnapshotAsOf(params.bookDir, asOfChapter);
+    const boundedFacts = filterFactsAsOf(snapshot.currentState.facts, asOfChapter);
+    const hooks = filterHooksForChapter(snapshot.hooks.hooks, params.chapterNumber);
+    const activeHooks = filterActiveHooks(hooks);
+    return {
+      summaries: selectRelevantSummaries(snapshot.chapterSummaries.rows, params.chapterNumber, narrativeQueryTerms),
+      hooks: selectRelevantHooks(activeHooks, narrativeQueryTerms, params.chapterNumber),
+      activeHooks,
+      recyclableHooks: computeRecyclableHooks(activeHooks, params.chapterNumber),
+      facts: selectRelevantFacts(boundedFacts, factQueryTerms),
+      volumeSummaries,
+    };
+  }
+
+  await bootstrapStructuredStateFromMarkdown({
+    bookDir: params.bookDir,
+    fallbackChapter,
+  }).catch(() => undefined);
+
+  const [
+    currentStateMarkdown,
+    hooksMarkdown,
+    structuredCurrentState,
+    structuredHooks,
+    structuredSummaries,
+  ] = await Promise.all([
+    readCurrentStateWithFallback(params.bookDir),
+    readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
+    readStructuredState(join(stateDir, "current_state.json"), CurrentStateStateSchema),
+    readStructuredState(join(stateDir, "hooks.json"), HooksStateSchema),
+    readStructuredState(join(stateDir, "chapter_summaries.json"), ChapterSummariesStateSchema),
+  ]);
+  const facts = structuredCurrentState?.facts ?? parseCurrentStateFacts(
+    currentStateMarkdown,
+    fallbackChapter,
   );
   // Hooks stay on the authority path instead of the SQLite acceleration path:
   // the DB table intentionally stores only a small subset and cannot preserve
@@ -527,4 +547,24 @@ function slugifyAnchor(value: string): string {
     .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
     .replace(/^-+|-+$/g, "")
     || "volume-summary";
+}
+
+function filterFactsAsOf(facts: ReadonlyArray<Fact>, asOfChapter: number): Fact[] {
+  return facts.filter((fact) =>
+    fact.validFromChapter <= asOfChapter
+    && fact.sourceChapter <= asOfChapter
+    && (fact.validUntilChapter === null || fact.validUntilChapter > asOfChapter),
+  );
+}
+
+function filterHooksForChapter(hooks: ReadonlyArray<StoredHook>, chapterNumber: number): StoredHook[] {
+  return hooks.filter((hook) =>
+    !isTemporaryHookId(hook.hookId)
+    && hook.startChapter <= chapterNumber
+    && hook.lastAdvancedChapter <= chapterNumber,
+  );
+}
+
+function isTemporaryHookId(hookId: string): boolean {
+  return hookId.startsWith("tmp_") || hookId.startsWith("temp_");
 }

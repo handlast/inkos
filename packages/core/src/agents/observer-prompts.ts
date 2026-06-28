@@ -29,7 +29,14 @@ ${isEnglish ? `1. **Character actions**: Who did what, to whom, why
 6. **Information flow**: Who learned what, who is still unaware
 7. **Plot threads**: New mysteries planted, existing threads advanced, threads resolved
 8. **Time progression**: How much time passed, time markers mentioned
-9. **Physical state**: Injuries, healing, fatigue, power changes` : `1. **角色行为**：谁做了什么，对谁，为什么
+9. **Physical state**: Injuries, healing, fatigue, power changes
+10. **Military operations**: Force deployments, troop movements, casualties, morale shifts, command changes, battle outcomes
+11. **Territorial control**: City/fortress/region control changes, front line shifts, sieges
+12. **Naval operations**: Fleet movements, sea battles, port blockades, ship losses
+13. **Dynasty events**: Successions, marriages, deaths, regencies, inheritance changes
+14. **Treasury changes**: Income, expenditures, tributes, mercenary costs, tax base changes
+15. **Era mood shifts**: Prosperity/war/stability/innovation/decay dimension changes
+16. **Geographic changes**: New locations discovered, terrain features, route discoveries, environmental shifts, climate events` : `1. **角色行为**：谁做了什么，对谁，为什么
 2. **位置变化**：谁去了哪里，从哪里来
 3. **资源变化**：获得、失去、消耗了什么，具体数量
 4. **关系变化**：新相遇、信任/不信任转变、结盟、背叛
@@ -37,7 +44,14 @@ ${isEnglish ? `1. **Character actions**: Who did what, to whom, why
 6. **信息流动**：谁知道了什么新信息，谁仍然不知情
 7. **剧情线索**：新埋下的悬念、已有线索的推进、线索的解答
 8. **时间推进**：过了多少时间，提到的时间标记
-9. **身体状态**：受伤、恢复、疲劳、战力变化`}
+9. **身体状态**：受伤、恢复、疲劳、战力变化
+10. **军事行动**：部队调动、参战、伤亡、士气变化、换帅、战役结果
+11. **领地控制**：城池/要塞/区域易手、战线变化、围城
+12. **海战/海军**：舰队移动、海战、封港、损舰
+13. **王朝事件**：继位、婚姻、死亡、摄政、继承权变化
+14. **财政变动**：收入、支出、贡赋、雇兵费用、税基变化
+15. **时代情绪**：繁荣/战乱/稳定/变革/衰败/信仰维度变化
+16. **地理变化**：发现新地点、地形特征、路线发现、环境变化、气候事件`}
 
 ${isEnglish ? "## Rules" : "## 规则"}
 
@@ -50,6 +64,22 @@ ${isEnglish ? `- Extract from the TEXT ONLY — do not infer what might happen
 - 具体化："陆承烬左肩旧伤开裂" 而非 "陆承烬受伤了"
 - 记录章节内的时间标记
 - 标注每个场景中在场的角色`}
+
+${isEnglish ? `## Hook Extraction Rules (MUST follow strictly)
+
+The following MUST be recorded in [PLOT_THREADS]:
+- **ADVANCED**: New facts/evidence/risk escalation/scope narrowing → record as "ADVANCED: <hook description> — <specific progress>"
+- **RESOLVED**: Hook explicitly revealed or resolved → record as "RESOLVED: <hook description> — <resolution>"
+- **NEW**: New unsolved mystery/puzzle/conflict appears → record as "NEW: <description>"
+- **Physical evidence**: Character discovers/obtains/observes new evidence → MUST record, this is the core signal of hook advancement
+- **Threat escalation**: Dangerous/hostile behavior/attack escalation → MUST record, this is an important signal of hook advancement` : `## 伏笔提取铁律（必须严格执行）
+
+以下内容必须在 [剧情线索] 中记录：
+- **推进**：正文中有新事实/证据/风险升级/范围收缩 → 记录为 "ADVANCED: <伏笔描述> — <具体进展>"
+- **回收**：伏笔被明确揭示或解决 → 记录为 "RESOLVED: <伏笔描述> — <解答>"
+- **新开**：正文出现了新的未解悬念/谜题/冲突 → 记录为 "NEW: <描述>"
+- **物理证据**：角色发现/获得/观察到新证据 → 必须记录，这是伏笔推进的核心信号
+- **威胁升级**：危险/敌对行为/攻击升级 → 必须记录，这是伏笔推进的重要信号`}
 
 ${isEnglish ? "## Output Format" : "## 输出格式"}
 

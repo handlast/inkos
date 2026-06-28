@@ -127,6 +127,76 @@ export async function loadNarrativeMemorySeed(bookDir: string): Promise<Narrativ
   };
 }
 
+const DYNAMIC_STORY_FILES = new Set([
+  "current_state.md",
+  "pending_hooks.md",
+  "chapter_summaries.md",
+  "particle_ledger.md",
+  "subplot_board.md",
+  "emotional_arcs.md",
+  "character_matrix.md",
+  "character_assets.md",
+  "scene_ledger.md",
+  "relationship_graph.md",
+  "era_mood.md",
+  "alliance_state.md",
+  "military_forces.md",
+  "war_theater.md",
+  "battle_log.md",
+  "territory_control.md",
+  "epoch_timeline.md",
+  "naval_forces.md",
+  "dynasty_tree.md",
+  "treasury_state.md",
+]);
+
+export async function readDynamicStoryFileAsOf(bookDir: string, asOfChapter: number, fileName: string): Promise<string> {
+  if (!DYNAMIC_STORY_FILES.has(fileName)) {
+    throw new Error(`not a dynamic story file: ${fileName}`);
+  }
+  return readFile(join(bookDir, "story", "snapshots", String(Math.max(0, asOfChapter)), fileName), "utf-8").catch(() => "");
+}
+
+export async function loadRuntimeStateSnapshotAsOf(
+  bookDir: string,
+  asOfChapter: number,
+  language: "zh" | "en" = "zh",
+): Promise<RuntimeStateSnapshot> {
+  const snapshotDir = join(bookDir, "story", "snapshots", String(Math.max(0, asOfChapter)));
+  const stateDir = join(snapshotDir, "state");
+
+  const [manifest, currentState, hooks, chapterSummaries] = await Promise.all([
+    readJsonOrNull(join(stateDir, "manifest.json"), StateManifestSchema),
+    readJsonOrNull(join(stateDir, "current_state.json"), CurrentStateStateSchema),
+    readJsonOrNull(join(stateDir, "hooks.json"), HooksStateSchema),
+    readJsonOrNull(join(stateDir, "chapter_summaries.json"), ChapterSummariesStateSchema),
+  ]);
+
+  const fallbackCurrentState = currentState ?? {
+    facts: parseCurrentStateFacts(
+      await readFile(join(snapshotDir, "current_state.md"), "utf-8").catch(() => ""),
+      asOfChapter,
+    ),
+  };
+  const fallbackHooks = hooks ?? {
+    hooks: [],
+  };
+  const fallbackSummaries = chapterSummaries ?? { rows: [] };
+
+  return {
+    manifest: manifest ?? {
+      schemaVersion: 2,
+      language,
+      lastAppliedChapter: Math.max(0, asOfChapter),
+      projectionVersion: 1,
+      migrationWarnings: [],
+    },
+    currentState: fallbackCurrentState,
+    hooks: fallbackHooks,
+    chapterSummaries: fallbackSummaries,
+  };
+}
+
 export async function loadSnapshotCurrentStateFacts(
   bookDir: string,
   chapterNumber: number,

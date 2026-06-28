@@ -9,8 +9,44 @@ import type { WriterAgent } from "../agents/writer.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
-import type { ContextPackage, RuleStack } from "../models/input-governance.js";
+import type { ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthLanguage } from "../utils/length-metrics.js";
+
+const BLOCKING_STATE_VALIDATION_CATEGORIES = new Set([
+  "missing_state_change",
+  "hook_anomaly",
+  "truth_persistence_gate",
+]);
+
+const BLOCKING_STATE_VALIDATION_PATTERNS: ReadonlyArray<RegExp> = [
+  /hooks pool.*全部移除/i,
+  /hooks pool.*removed/i,
+  /状态卡.*未更新/,
+  /状态卡未捕捉/,
+  /不应消失/,
+  /state card.*not updated/i,
+  /missing state change/i,
+  /hook anomaly/i,
+];
+
+export function collectBlockingStateValidationWarnings(
+  validation: ValidationResult,
+): ReadonlyArray<ValidationWarning> {
+  return validation.warnings.filter((warning) => isBlockingStateValidationWarning(warning));
+}
+
+export function shouldRetryStateSettlement(validation: ValidationResult): boolean {
+  return !validation.passed || collectBlockingStateValidationWarnings(validation).length > 0;
+}
+
+export function isBlockingStateValidationWarning(warning: ValidationWarning): boolean {
+  const category = String(warning.category ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (BLOCKING_STATE_VALIDATION_CATEGORIES.has(category)) {
+    return true;
+  }
+  const text = `${warning.category ?? ""} ${warning.description ?? ""}`;
+  return BLOCKING_STATE_VALIDATION_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 export interface SettlementRetryParams {
   readonly writer: Pick<WriterAgent, "settleChapterState">;
@@ -22,6 +58,7 @@ export interface SettlementRetryParams {
   readonly content: string;
   readonly reducedControlInput?: {
     chapterIntent: string;
+    chapterMemo?: ChapterMemo;
     contextPackage: ContextPackage;
     ruleStack: RuleStack;
   };
@@ -60,6 +97,7 @@ export async function retrySettlementAfterValidationFailure(
     content: params.content,
     allowReapply: true,
     chapterIntent: params.reducedControlInput?.chapterIntent,
+    chapterMemo: params.reducedControlInput?.chapterMemo,
     contextPackage: params.reducedControlInput?.contextPackage,
     ruleStack: params.reducedControlInput?.ruleStack,
     validationFeedback: buildStateValidationFeedback(
@@ -93,7 +131,7 @@ export async function retrySettlementAfterValidationFailure(
     }
   }
 
-  if (retryValidation.passed) {
+  if (!shouldRetryStateSettlement(retryValidation)) {
     return {
       kind: "recovered",
       output: retryOutput,
@@ -120,12 +158,14 @@ export function buildStateValidationFeedback(
   if (language === "en") {
     return [
       "The previous settlement failed validation. Fix these contradictions against the chapter body:",
+      "Map every missing_state_change into currentStatePatch, every missing_hook_update into hookOps.upsert with lastAdvancedChapter equal to the current chapter, and every character/information-boundary issue into characterMatrixOps or currentStatePatch. Do not rely on notes-only fixes.",
       ...warnings.map((warning) => `- [${warning.category}] ${warning.description}`),
     ].join("\n");
   }
 
   return [
     "上一次状态结算未通过校验。请对照正文修正以下矛盾：",
+    "把每条 missing_state_change 映射到 currentStatePatch；把每条 missing_hook_update 映射到 hookOps.upsert，lastAdvancedChapter 必须等于当前章节；把人物/信息边界/关系压力问题映射到 characterMatrixOps 或 currentStatePatch。不要只写 notes。",
     ...warnings.map((warning) => `- [${warning.category}] ${warning.description}`),
   ].join("\n");
 }
@@ -134,8 +174,9 @@ export function buildStateDegradedIssues(
   warnings: ReadonlyArray<ValidationWarning>,
   language: LengthLanguage,
 ): ReadonlyArray<AuditIssue> {
-  if (warnings.length > 0) {
-    return warnings.map((warning) => ({
+  const blocking = warnings.filter(isBlockingStateValidationWarning);
+  if (blocking.length > 0) {
+    return blocking.map((warning) => ({
       severity: "warning" as const,
       category: "state-validation",
       description: warning.description,

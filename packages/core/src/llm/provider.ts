@@ -487,6 +487,7 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
     || msg.includes("ECONNRESET")
     || msg.includes("ETIMEDOUT")
     || msg.includes("EPIPE")
+    || msg.includes("socket connection was closed unexpectedly")
   ) {
     return new Error(
       `无法连接到 API 服务。可能原因：\n` +
@@ -548,6 +549,7 @@ function isTransientLLMTransportError(error: unknown): boolean {
     "socket hang up",
     "other side closed",
     "network socket disconnected",
+    "socket connection was closed unexpectedly",
   ].some((needle) => text.includes(needle));
 }
 

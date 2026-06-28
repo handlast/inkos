@@ -3,10 +3,6 @@ import type { BookConfig } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import { buildWriterSystemPrompt, type FanficContext } from "./writer-prompts.js";
-import { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./settler-prompts.js";
-import { buildObserverSystemPrompt, buildObserverUserPrompt } from "./observer-prompts.js";
-import { parseSettlerDeltaOutput } from "./settler-delta-parser.js";
-import { parseSettlementOutput } from "./settler-parser.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import {
   detectCrossChapterRepetition,
@@ -16,10 +12,13 @@ import {
   type PostWriteViolation,
 } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
+import { mutateAITells } from "./ai-tell-mutator.js";
+import { settle as settleExtracted, settleChapterState as settleChapterStateExtracted } from "./writer-settle.js";
+import { buildCharacterContextCardsFromMarkdown } from "./character-context-card.js";
 import type { ChapterIntent, ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import type { RuntimeStateDelta } from "../models/runtime-state.js";
-import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
+import { buildLengthSpec, countChapterLength, isOutsideSoftRange } from "../utils/length-metrics.js";
 import {
   capContextBlock,
   filterHooks,
@@ -32,8 +31,6 @@ import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js"
 import {
   buildGovernedCharacterMatrixWorkingSet,
   buildGovernedHookWorkingSet,
-  mergeCharacterMatrixMarkdown,
-  mergeTableMarkdownByKey,
 } from "../utils/governed-working-set.js";
 import { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "../utils/pov-filter.js";
 import { parseCreativeOutput } from "./writer-parser.js";
@@ -93,6 +90,7 @@ export interface SettleChapterStateInput {
   readonly content: string;
   readonly allowReapply?: boolean;
   readonly chapterIntent?: string;
+  readonly chapterMemo?: ChapterMemo;
   readonly contextPackage?: ContextPackage;
   readonly ruleStack?: RuleStack;
   readonly validationFeedback?: string;
@@ -130,6 +128,40 @@ export interface WriteChapterOutput {
     readonly suggestion: string;
   }>;
   readonly tokenUsage?: TokenUsage;
+}
+
+function programmaticTrim(
+  content: string,
+  targetWords: number,
+  spec: LengthSpec,
+  countingMode: "zh" | "en",
+  language: "zh" | "en",
+): { content: string; trimmed: boolean; method: string } {
+  const actual = countChapterLength(content, countingMode);
+  if (!isOutsideSoftRange(actual, spec)) {
+    return { content, trimmed: false, method: "within_soft_range" };
+  }
+  if (actual <= targetWords) {
+    return { content, trimmed: false, method: "underflow_skip" };
+  }
+  const paragraphs = content.split(/\n\n+/);
+  const cumulative: number[] = [];
+  let total = 0;
+  for (const p of paragraphs) {
+    total += countChapterLength(p, countingMode);
+    cumulative.push(total);
+  }
+  let cutIndex = cumulative.findIndex(c => c >= targetWords);
+  if (cutIndex < 0) cutIndex = paragraphs.length - 1;
+  const quotePattern = language === "zh" ? /["「」『』]/g : /[""]/g;
+  while (cutIndex > 0) {
+    const quoteChars = (paragraphs[cutIndex].match(quotePattern) || []).length;
+    const ratio = paragraphs[cutIndex].length > 0 ? quoteChars / paragraphs[cutIndex].length : 0;
+    if (ratio <= 0.3) break;
+    cutIndex--;
+  }
+  const trimmed = paragraphs.slice(0, cutIndex + 1).join("\n\n");
+  return { content: trimmed, trimmed: true, method: "tail_trim" };
 }
 
 export class WriterAgent extends BaseAgent {
@@ -380,16 +412,40 @@ export class WriterAgent extends BaseAgent {
       : [];
 
     // ── Post-write validation (regex + rule-based, zero LLM cost) ──
-    const surfaceNormalizedContent = normalizePostWriteSurface(creative.content, resolvedLanguage);
-    const surfaceNormalizedWordCount = countChapterLength(surfaceNormalizedContent, resolvedLengthSpec.countingMode);
+    let settledContent = normalizePostWriteSurface(creative.content, resolvedLanguage);
+    let settledWordCount = countChapterLength(settledContent, resolvedLengthSpec.countingMode);
+    const trimResult = programmaticTrim(settledContent, resolvedLengthSpec.target, resolvedLengthSpec, resolvedLengthSpec.countingMode, resolvedLanguage);
+    if (trimResult.trimmed) {
+      settledContent = trimResult.content;
+      settledWordCount = countChapterLength(settledContent, resolvedLengthSpec.countingMode);
+    }
+    const mutationIntensity = bookRules?.antiAIGC?.intensity ?? 0.5;
+    if (mutationIntensity > 0) {
+      const { content: mutated, mutations } = mutateAITells(settledContent, resolvedLanguage, mutationIntensity);
+      if (mutations > 0) {
+        settledContent = mutated;
+        settledWordCount = countChapterLength(settledContent, resolvedLengthSpec.countingMode);
+      }
+    }
     const ruleViolations = [
-      ...validatePostWrite(surfaceNormalizedContent, genreProfile, bookRules, resolvedLanguage),
-      ...detectCrossChapterRepetition(surfaceNormalizedContent, fingerprintChapters, resolvedLanguage),
-      ...detectParagraphLengthDrift(surfaceNormalizedContent, fingerprintChapters, resolvedLanguage),
+      ...validatePostWrite(settledContent, genreProfile, bookRules, resolvedLanguage),
+      ...detectCrossChapterRepetition(settledContent, fingerprintChapters, resolvedLanguage),
+      ...detectParagraphLengthDrift(settledContent, fingerprintChapters, resolvedLanguage),
     ];
-    const aiTellIssues = analyzeAITells(surfaceNormalizedContent, resolvedLanguage).issues;
+    const aiTellIssues = analyzeAITells(settledContent, resolvedLanguage).issues;
+    const criticalAITellViolations = aiTellIssues
+      .filter(issue => issue.severity === "critical")
+      .map(issue => ({
+        severity: "error" as const,
+        rule: `ai-tell:${issue.category}`,
+        description: issue.description,
+        suggestion: issue.suggestion,
+      }));
 
-    const postWriteErrors = ruleViolations.filter(v => v.severity === "error");
+    const postWriteErrors = [
+      ...ruleViolations.filter(v => v.severity === "error"),
+      ...criticalAITellViolations,
+    ];
     const postWriteWarnings = ruleViolations.filter(v => v.severity === "warning");
 
     if (ruleViolations.length > 0) {
@@ -430,8 +486,8 @@ export class WriterAgent extends BaseAgent {
     return {
       chapterNumber,
       title: creative.title,
-      content: surfaceNormalizedContent,
-      wordCount: surfaceNormalizedWordCount,
+      content: settledContent,
+      wordCount: settledWordCount,
       preWriteCheck: creative.preWriteCheck,
       postSettlement: settlement.postSettlement,
       runtimeStateDelta: resolvedRuntimeStateDelta,
@@ -454,100 +510,10 @@ export class WriterAgent extends BaseAgent {
   }
 
   async settleChapterState(input: SettleChapterStateInput): Promise<WriteChapterOutput> {
-    const [
-      currentState,
-      ledger,
-      hooks,
-      chapterSummaries,
-      subplotBoard,
-      emotionalArcs,
-      characterMatrix,
-      volumeOutline,
-    ] = await Promise.all([
-      // Phase 5 consolidation fallback: derive initial state when only seed on disk.
-      readCurrentStateWithFallback(input.bookDir, "(文件尚未创建)"),
-      this.readFileOrDefault(join(input.bookDir, "story/particle_ledger.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/pending_hooks.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/chapter_summaries.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/subplot_board.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/emotional_arcs.md")),
-      readCharacterContext(input.bookDir, "(文件尚未创建)"),
-      readVolumeMap(input.bookDir, "(文件尚未创建)"),
-    ]);
-
-    const { profile: genreProfile } = await readGenreProfile(this.ctx.projectRoot, input.book.genre);
-    const parsedBookRules = await readBookRules(input.bookDir);
-    const bookRules = parsedBookRules?.rules ?? null;
-    const resolvedLanguage = input.book.language ?? genreProfile.language;
-    const governedMemoryBlocks = input.contextPackage
-      ? buildGovernedMemoryEvidenceBlocks(input.contextPackage, resolvedLanguage)
-      : undefined;
-
-    const settleResult = await this.settle({
-      book: input.book,
-      genreProfile,
-      bookRules,
-      chapterNumber: input.chapterNumber,
-      title: input.title,
-      content: input.content,
-      currentState,
-      ledger: genreProfile.numericalSystem ? ledger : "",
-      hooks,
-      chapterSummaries,
-      subplotBoard,
-      emotionalArcs,
-      characterMatrix,
-      volumeOutline,
-      selectedEvidenceBlock: governedMemoryBlocks
-        ? this.joinGovernedEvidenceBlocks(governedMemoryBlocks)
-        : undefined,
-      chapterIntent: input.chapterIntent,
-      contextPackage: input.contextPackage,
-      ruleStack: input.ruleStack,
-      validationFeedback: input.validationFeedback,
-      originalHooks: hooks,
-      originalSubplots: subplotBoard,
-      originalEmotionalArcs: emotionalArcs,
-      originalCharacterMatrix: characterMatrix,
-    });
-    const settlement = settleResult.settlement;
-    const runtimeStateArtifacts = await this.buildRuntimeStateArtifactsIfPresent(
-      input.bookDir,
-      settlement.runtimeStateDelta,
-      resolvedLanguage,
-      input.chapterNumber,
-      input.allowReapply,
-    );
-
-    return {
-      chapterNumber: input.chapterNumber,
-      title: input.title,
-      content: input.content,
-      wordCount: countChapterLength(
-        input.content,
-        resolvedLanguage === "en" ? "en_words" : "zh_chars",
-      ),
-      preWriteCheck: "",
-      postSettlement: settlement.postSettlement,
-      runtimeStateDelta: runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta,
-      runtimeStateSnapshot: runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot,
-      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
-      updatedLedger: settlement.updatedLedger,
-      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
-      chapterSummary: settlement.runtimeStateDelta
-        ? this.renderDeltaSummaryRow(settlement.runtimeStateDelta)
-        : settlement.chapterSummary,
-      updatedChapterSummaries: runtimeStateArtifacts?.chapterSummariesMarkdown,
-      updatedSubplots: settlement.updatedSubplots,
-      updatedEmotionalArcs: settlement.updatedEmotionalArcs,
-      updatedCharacterMatrix: settlement.updatedCharacterMatrix,
-      postWriteErrors: [],
-      postWriteWarnings: [],
-      tokenUsage: settleResult.usage,
-    };
+    return settleChapterStateExtracted(this, input);
   }
 
-  private async settle(params: {
+  async settle(params: {
     readonly book: BookConfig;
     readonly genreProfile: GenreProfile;
     readonly bookRules: BookRules | null;
@@ -563,7 +529,7 @@ export class WriterAgent extends BaseAgent {
     readonly characterMatrix: string;
     readonly volumeOutline: string;
     readonly selectedEvidenceBlock?: string;
-    readonly chapterIntent?: string;
+    readonly chapterIntent?: ChapterIntent;
     readonly contextPackage?: ContextPackage;
     readonly ruleStack?: RuleStack;
     readonly validationFeedback?: string;
@@ -571,122 +537,8 @@ export class WriterAgent extends BaseAgent {
     readonly originalSubplots: string;
     readonly originalEmotionalArcs: string;
     readonly originalCharacterMatrix: string;
-  }): Promise<{
-    settlement: ReturnType<typeof parseSettlementOutput> & {
-      runtimeStateDelta?: RuntimeStateDelta;
-      runtimeStateSnapshot?: RuntimeStateSnapshot;
-    };
-    usage: TokenUsage;
-  }> {
-    // Phase 2a: Observer — extract all facts from the chapter
-    const resolvedLang = params.book.language ?? params.genreProfile.language;
-    const observerSystem = buildObserverSystemPrompt(params.book, params.genreProfile, resolvedLang);
-    const observerUser = buildObserverUserPrompt(params.chapterNumber, params.title, params.content, resolvedLang);
-
-    this.logInfo(resolvedLang, {
-      zh: `阶段 2a：提取第${params.chapterNumber}章事实`,
-      en: `Phase 2a: observing facts for chapter ${params.chapterNumber}`,
-    });
-    const observerResponse = await this.chat(
-      [
-        { role: "system", content: observerSystem },
-        { role: "user", content: observerUser },
-      ],
-      { temperature: 0.5 },
-    );
-    const observations = observerResponse.content;
-
-    // Phase 2b: Reflector — merge observations into truth files
-    this.logInfo(resolvedLang, {
-      zh: "阶段 2b：把观察结果回写到真相文件",
-      en: "Phase 2b: reflecting observations into truth files",
-    });
-    const settlerSystem = buildSettlerSystemPrompt(
-      params.book, params.genreProfile, params.bookRules, resolvedLang,
-    );
-    const governedControlBlock = params.chapterIntent && params.contextPackage && params.ruleStack
-      ? this.buildSettlerGovernedControlBlock(
-          params.chapterIntent,
-          params.contextPackage,
-          params.ruleStack,
-          resolvedLang,
-        )
-      : undefined;
-
-    const settlerUser = buildSettlerUserPrompt({
-      chapterNumber: params.chapterNumber,
-      title: params.title,
-      content: params.content,
-      currentState: this.capLegacyContext("current_state", params.currentState, LEGACY_WRITER_CONTEXT_BUDGET.currentState),
-      ledger: this.capLegacyContext("particle_ledger", params.ledger, LEGACY_WRITER_CONTEXT_BUDGET.ledger),
-      hooks: this.capLegacyContext("pending_hooks", params.hooks, LEGACY_WRITER_CONTEXT_BUDGET.hooks),
-      chapterSummaries: this.capLegacyContext(
-        "chapter_summaries",
-        params.chapterSummaries,
-        LEGACY_WRITER_CONTEXT_BUDGET.chapterSummaries,
-      ),
-      subplotBoard: this.capLegacyContext("subplot_board", params.subplotBoard, LEGACY_WRITER_CONTEXT_BUDGET.subplotBoard),
-      emotionalArcs: this.capLegacyContext("emotional_arcs", params.emotionalArcs, LEGACY_WRITER_CONTEXT_BUDGET.emotionalArcs),
-      characterMatrix: this.capLegacyContext(
-        "character_matrix",
-        params.characterMatrix,
-        LEGACY_WRITER_CONTEXT_BUDGET.characterMatrix,
-      ),
-      volumeOutline: this.capLegacyContext("volume_outline", params.volumeOutline, LEGACY_WRITER_CONTEXT_BUDGET.volumeOutline),
-      observations,
-      selectedEvidenceBlock: params.selectedEvidenceBlock,
-      governedControlBlock,
-      validationFeedback: params.validationFeedback,
-    });
-
-    const response = await this.chat(
-      [
-        { role: "system", content: settlerSystem },
-        { role: "user", content: settlerUser },
-      ],
-      { temperature: 0.3 },
-    );
-
-    let mergedSettlement: ReturnType<typeof parseSettlementOutput> & {
-      runtimeStateDelta?: RuntimeStateDelta;
-      runtimeStateSnapshot?: RuntimeStateSnapshot;
-    };
-    try {
-      const deltaOutput = parseSettlerDeltaOutput(response.content);
-      mergedSettlement = {
-        postSettlement: deltaOutput.postSettlement,
-        runtimeStateDelta: deltaOutput.runtimeStateDelta,
-        updatedState: "",
-        updatedLedger: "",
-        updatedHooks: "",
-        chapterSummary: "",
-        updatedSubplots: "",
-        updatedEmotionalArcs: "",
-        updatedCharacterMatrix: "",
-      };
-    } catch {
-      const settlement = parseSettlementOutput(response.content, params.genreProfile);
-      mergedSettlement = governedControlBlock
-        ? {
-            ...settlement,
-            updatedHooks: mergeTableMarkdownByKey(params.originalHooks, settlement.updatedHooks, [0]),
-            updatedSubplots: settlement.updatedSubplots
-              ? mergeTableMarkdownByKey(params.originalSubplots, settlement.updatedSubplots, [0])
-              : settlement.updatedSubplots,
-            updatedEmotionalArcs: settlement.updatedEmotionalArcs
-              ? mergeTableMarkdownByKey(params.originalEmotionalArcs, settlement.updatedEmotionalArcs, [0, 1])
-              : settlement.updatedEmotionalArcs,
-            updatedCharacterMatrix: settlement.updatedCharacterMatrix
-              ? mergeCharacterMatrixMarkdown(params.originalCharacterMatrix, settlement.updatedCharacterMatrix)
-              : settlement.updatedCharacterMatrix,
-          }
-        : settlement;
-    }
-
-    return {
-      settlement: mergedSettlement,
-      usage: response.usage,
-    };
+  }): Promise<{ settlement: SettlementResult; usage: TokenUsage }> {
+    return settleExtracted(this, params);
   }
 
   async saveChapter(
