@@ -39,12 +39,22 @@ export function capContextBlock(content: string, options: ContextCapOptions): st
   return `${content.slice(0, headChars)}${note}${content.slice(-tailChars)}`;
 }
 
-/** Filter pending_hooks: remove resolved/closed hooks. */
-export function filterHooks(hooks: string): string {
+/** Filter pending_hooks: remove resolved/closed, future, and temporary hooks. */
+export function filterHooks(hooks: string, currentChapter?: number): string {
   if (!hooks || hooks === "(文件尚未创建)") return hooks;
   return filterTableRows(hooks, (row) => {
+    const cells = parseTableCells(row);
+    const hookId = cells[0] ?? "";
+    const startChapter = parseInt(cells[1] ?? "", 10);
+    const lastAdvancedChapter = parseInt(cells[4] ?? "", 10);
     const lower = row.toLowerCase();
-    return !lower.includes("已回收") && !lower.includes("resolved") && !lower.includes("closed");
+    if (/^(new|monitoring)-/i.test(hookId.trim())) return false;
+    if (lower.includes("已回收") || lower.includes("resolved") || lower.includes("closed")) return false;
+    if (typeof currentChapter === "number") {
+      if (Number.isFinite(startChapter) && startChapter > currentChapter) return false;
+      if (Number.isFinite(lastAdvancedChapter) && lastAdvancedChapter > currentChapter) return false;
+    }
+    return true;
   });
 }
 
@@ -163,7 +173,7 @@ function isHeaderRow(line: string): boolean {
  * Keeps header rows + separator rows + rows passing the predicate.
  * Falls back to original if filtering empties all data rows.
  */
-function filterTableRows(content: string, predicate: (row: string) => boolean): string {
+function filterTableRows(content: string, predicate: (row: string) => boolean, options: { allowEmpty?: boolean } = {}): string {
   const lines = content.split("\n");
   const nonTableLines: string[] = [];
   const headerLines: string[] = [];
@@ -181,10 +191,17 @@ function filterTableRows(content: string, predicate: (row: string) => boolean): 
 
   const filtered = dataLines.filter(predicate);
 
-  // Fallback: if no rows pass, return original
-  if (filtered.length === 0 && dataLines.length > 0) {
+  // Fallback: if no rows pass, return original (unless allowEmpty is true)
+  if (filtered.length === 0 && dataLines.length > 0 && options.allowEmpty !== true) {
     return content;
   }
 
   return [...nonTableLines, ...headerLines, ...filtered].join("\n");
+}
+
+function parseTableCells(row: string): string[] {
+  return row
+    .split("|")
+    .slice(1, -1)
+    .map((cell) => cell.trim());
 }

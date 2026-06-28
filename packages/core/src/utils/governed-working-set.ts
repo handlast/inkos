@@ -25,6 +25,11 @@ export function buildGovernedHookWorkingSet(params: {
     return hooksMarkdown;
   }
 
+  const eligibleHooks = hooks.filter((hook) => isGovernedHookEligible(hook, params.chapterNumber));
+  if (eligibleHooks.length === 0) {
+    return renderHookSnapshot([], params.language);
+  }
+
   const selectedIds = new Set(
     params.contextPackage.selectedContext
       .filter((entry) => entry.source.startsWith("story/pending_hooks.md#"))
@@ -32,7 +37,7 @@ export function buildGovernedHookWorkingSet(params: {
       .filter(Boolean),
   );
   const agendaIds = collectHookAgendaIds(params.chapterIntent);
-  const workingSet = hooks.filter((hook) =>
+  const inWindowSet = eligibleHooks.filter((hook) =>
     selectedIds.has(hook.hookId)
       || agendaIds.has(hook.hookId)
       || isHookWithinChapterWindow(
@@ -42,11 +47,28 @@ export function buildGovernedHookWorkingSet(params: {
         ),
   );
 
-  if (workingSet.length === 0 || workingSet.length >= hooks.length) {
+  // Exempt stale/overdue hooks: retain up to 3 that fell outside the window
+  const inWindowIds = new Set(inWindowSet.map((h) => h.hookId));
+  const staleOverdueExtra = eligibleHooks
+    .filter((hook) => !inWindowIds.has(hook.hookId) && hook.status && (hook.status.includes("stale") || hook.status.includes("overdue")))
+    .slice(0, 3);
+  const workingSet = [...inWindowSet, ...staleOverdueExtra];
+
+  if (workingSet.length === 0) {
+    return renderHookSnapshot([], params.language);
+  }
+  if (workingSet.length >= eligibleHooks.length && eligibleHooks.length === hooks.length) {
     return hooksMarkdown;
   }
 
   return renderHookSnapshot(workingSet, params.language);
+}
+
+function isGovernedHookEligible(hook: { hookId: string; status: string; startChapter: number; lastAdvancedChapter: number }, chapterNumber: number): boolean {
+  if (/^(new|monitoring)-/i.test(hook.hookId.trim())) return false;
+  if (/^(resolved|closed|done|已回收|已解决)$/i.test(hook.status.trim())) return false;
+  if (hook.startChapter > chapterNumber || hook.lastAdvancedChapter > chapterNumber) return false;
+  return true;
 }
 
 function collectHookAgendaIds(chapterIntent?: string): Set<string> {
